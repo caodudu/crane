@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crane"
+version = "0.0.1.dev0"
+description = "Early sync preview of the CRANE package."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "caodudu" }
+]
+dependencies = [
+  "anndata>=0.11",
+  "numpy>=2.0",
+  "pandas>=2.0",
+  "scanpy>=1.10",
+  "scikit-learn>=1.4",
+  "scipy>=1.13"
+]
+
+[project.optional-dependencies]
+extensions = [
+  "dynamicTreeCut>=0.1.1",
+  "eva-lcd>=0.1.1",
+  "igraph>=1.0.0",
+  "leidenalg>=0.11.0",
+  "networkx>=3.0"
+]
+
+[project.scripts]
+crane = "crane.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["crane*"]
