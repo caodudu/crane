@@ -69,8 +69,9 @@ def run_standard_scanpy_graph(adata, layer: str, output_dir: Path):
     sc.pp.highly_variable_genes(
         view,
         layer=layer,
-        n_top_genes=min(2000, view.n_vars),
-        flavor="seurat",
+        min_mean=0.0125,
+        max_mean=3,
+        min_disp=0.5,
     )
     baseline = view[:, view.var["highly_variable"].to_numpy()].copy()
     baseline.X = baseline.layers[layer].copy()

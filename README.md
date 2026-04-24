@@ -23,7 +23,7 @@ Your data should contain:
 - a column in `adata.obs` that labels control and perturbed cells
 - enough cells in both groups for balanced sampling
 
-The demo GSC CRISPR data uses:
+The demo GSC CRISPR data uses a perturbation targeting the `GSC` gene:
 
 ```text
 expression layer: adata.layers["log1p_norm"]
@@ -37,12 +37,16 @@ case label: "GSC"
 ```bash
 git clone https://github.com/caodudu/crane.git
 cd crane
+
+conda create -n crane-demo python=3.10 -y
+conda activate crane-demo
+
 pip install -e .
 ```
 
 ## Demo Workspace
 
-Create a local test workspace and rebuild the demo `.h5ad` files:
+Create a local test workspace inside the cloned repository and rebuild the demo `.h5ad` files. If you just ran the installation commands above, you are already inside this directory.
 
 ```bash
 mkdir demo_workspace
@@ -82,7 +86,13 @@ adata = sc.read_h5ad("demo_workspace/data/demo_gsc.h5ad")
 
 # Standard Scanpy exploratory view. CRANE below still uses the original adata.
 view = adata.copy()
-sc.pp.highly_variable_genes(view, layer="log1p_norm", n_top_genes=2000, flavor="seurat")
+sc.pp.highly_variable_genes(
+    view,
+    layer="log1p_norm",
+    min_mean=0.0125,
+    max_mean=3,
+    min_disp=0.5,
+)
 view_hvg = view[:, view.var["highly_variable"]].copy()
 view_hvg.X = view_hvg.layers["log1p_norm"].copy()
 sc.pp.pca(view_hvg)
@@ -243,3 +253,13 @@ Example output, showing only the highest-response component for each gene set:
 | EGFR | EGFR_pc1 | 0.584 | 0.567 | -0.599 |
 
 After the demo workspace is created, all commands above can be copied and run without editing paths or parameters.
+
+## Demo Data Sources
+
+The GSC CRISPR demo is derived from:
+
+Genga, R. M. J. et al. Single-cell RNA-sequencing-based CRISPRi screening resolves molecular drivers of early human endoderm development. *Cell Reports* 27, 708-718.e10 (2019).
+
+The Erlotinib drug demo is derived from:
+
+Chang, M. T. et al. Identifying transcriptional programs underlying cancer drug response with TraCe-seq. *Nature Biotechnology* 40, 86-93 (2022).
