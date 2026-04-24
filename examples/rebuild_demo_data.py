@@ -14,7 +14,7 @@ from scipy import sparse
 
 DATASETS = {
     "gsc": "gsc",
-    "drug-trace-progeny": "drug_trace_progeny",
+    "erlotinib": "erlotinib_drug",
 }
 
 
@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="data",
+        default="demo_workspace/data",
         help="Directory where rebuilt .h5ad files will be written.",
     )
     return parser.parse_args()

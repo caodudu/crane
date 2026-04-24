@@ -2,31 +2,34 @@
 
 CRANE is a Python package for analyzing perturbation responses in single-cell expression data.
 
-It is designed for experiments such as CRISPR screens, Perturb-seq, CROP-seq, drug perturbation assays, or other single-cell perturbation studies where users want to ask:
+Unlike a simple perturbed-vs-control expression comparison, CRANE evaluates whether expression changes are aligned with perturbation labels across local cell neighborhoods. This is useful when some labeled cells do not fully respond, or when batch, cell cycle, library size, and other structured variation obscure the perturbation signal.
+
+CRANE helps answer:
 
 - Which genes respond to this perturbation?
-- Which cells show a stronger perturbation response?
-- Which pathways or gene sets are affected?
+- Which cells respond to this perturbation?
+- Which functions (gene sets) respond to this perturbation?
 
 ![CRANE algorithm overview](assets/crane_algorithm_overview_fig1c.png)
 
 ## What You Need
 
-CRANE works with an `AnnData` object, usually stored as an `.h5ad` file.
+CRANE uses an `AnnData` object, usually stored as an `.h5ad` file.
 
 Your data should contain:
 
-- an expression matrix in `adata.X` or an expression layer
-- a column in `adata.obs` that stores perturbation labels
-- one label for control cells
-- one label for the perturbation you want to analyze
+- a cells-by-genes expression matrix in `adata.X` or an expression layer
+- gene names in `adata.var_names`
+- a column in `adata.obs` that labels control and perturbed cells
+- enough cells in both groups for balanced sampling
 
-Example:
+The demo GSC CRISPR data uses:
 
 ```text
-adata.obs["perturbation"]
+expression layer: adata.layers["log1p_norm"]
+perturbation labels: adata.obs["perturbation_targets"]
 control label: "control"
-case label: "KRAS-G12D"
+case label: "GSC"
 ```
 
 ## Installation
@@ -35,154 +38,218 @@ case label: "KRAS-G12D"
 git clone https://github.com/caodudu/crane.git
 cd crane
 pip install -e .
+python examples/rebuild_demo_data.py
+python examples/scanpy_warmup.py
 ```
 
-For optional function or extension backends:
+These commands create a local `demo_workspace/` directory, rebuild the demo `.h5ad` files, and run a standard Scanpy HVG/PCA/neighbors/UMAP workflow once before CRANE.
+
+The Scanpy step is included for two reasons:
+
+- it warms up Scanpy/UMAP runtime dependencies before timing CRANE
+- it gives a familiar baseline view of the demo data
+
+The HVG-filtered Scanpy object is not used as CRANE input.
+
+## Standard Scanpy baseline
+
+The warm-up command writes baseline UMAP plots to:
+
+```text
+demo_workspace/scanpy/
+```
+
+This step uses the standard Scanpy HVG workflow for visualization only. CRANE is then run on the expression layer from the rebuilt AnnData object, not on the HVG-subsetted Scanpy object.
+
+## Quick Start (Gene response)
+
+Run the GSC CRISPR demo:
 
 ```bash
-pip install -e ".[extensions]"
+python examples/quickstart.py
 ```
 
-CRANE requires Python 3.10 or later.
-
-## Quick Start
+Equivalent Python API:
 
 ```python
 import scanpy as sc
 import crane
 
-adata = sc.read_h5ad("your_data.h5ad")
+adata = sc.read_h5ad("demo_workspace/data/demo_gsc.h5ad")
 
 result = crane.tl.gene_response(
     adata,
-    perturbation_key="perturbation",
+    perturbation_key="perturbation_targets",
     control_value="control",
-    case_value="KRAS-G12D",
-    layer="log_norm",      # optional; omit if using adata.X
+    case_value="GSC",
+    layer="log1p_norm",
     inplace=False,
 )
 
 result.summary().head()
 ```
 
-The output table ranks genes by perturbation response.
+Example output:
 
-Common columns include:
+| gene | response_identity | response_score | gene_self_cor | gene_label_cor |
+| --- | --- | --- | --- | --- |
+| MFAP4 | 1 | 1.249 | 0.886 | 0.880 |
+| POU5F1 | 1 | 1.245 | 0.913 | 0.846 |
+| CXCR4 | 1 | 1.230 | 0.906 | -0.833 |
+| LEFTY2 | 1 | 1.195 | 0.864 | -0.826 |
+| TMEM14B | 1 | 1.189 | 0.834 | -0.847 |
 
-- `response_score`: response strength
-- `response_identity`: whether CRANE calls the gene responsive
-- `gene_self_cor`: local expression consistency
-- `gene_label_cor`: alignment with perturbation labels
+The result object also supports response-gene relationship and module summaries:
 
-## Cell Response
+```python
+pair = result.gene_pair()
+module = result.gene_module(method="correlation_components")
+```
 
-Use `cell_response` when you want to inspect which labeled perturbed cells look more response-like.
+Example pairwise gene-response output:
+
+| gene | GSC | TMEM14B | CXCR4 | POU5F1 | LEFTY2 |
+| --- | --- | --- | --- | --- | --- |
+| GSC | 0.467 | 0.484 | 0.512 | -0.488 | 0.484 |
+| TMEM14B | 0.484 | 0.535 | 0.552 | -0.547 | 0.474 |
+| CXCR4 | 0.512 | 0.552 | 0.773 | -0.597 | 0.618 |
+| POU5F1 | -0.488 | -0.547 | -0.597 | 0.769 | -0.456 |
+| LEFTY2 | 0.484 | 0.474 | 0.618 | -0.456 | 0.701 |
+
+Example module output:
+
+| gene | module_label |
+| --- | --- |
+| GSC | M1 |
+| TMEM14B | M1 |
+| CXCR4 | M1 |
+| POU5F1 | M1 |
+| LEFTY2 | M1 |
+
+## Quick Start (Cell response)
+
+Run cell response on the same GSC CRISPR demo:
+
+```bash
+python examples/quickstart.py --cell-response
+```
+
+Python API:
 
 ```python
 cell_result = crane.tl.cell_response(
     adata,
-    perturbation_key="perturbation",
+    perturbation_key="perturbation_targets",
     control_value="control",
-    case_value="KRAS-G12D",
-    layer="log_norm",
+    case_value="GSC",
+    layer="log1p_norm",
     inplace=False,
 )
 
 cell_result.summary().head()
 ```
 
-## Function and Gene-Set Response
+Example output:
 
-After running `gene_response`, CRANE can score pathways or custom gene sets on the learned response graph.
+| cell | cell_score |
+| --- | --- |
+| AAACGGGAGGCCCGTT-1 | -0.513 |
+| AAACGGGGTGCAACTT-1 | -0.137 |
+| AAACGGGTCGCGGATC-1 | 0.505 |
+| AAAGCAATCGCCTGTT-1 | 0.422 |
+| AACACGTTCTAACTCT-1 | -0.705 |
+
+## Quick Start (Extension response)
+
+CRANE can also evaluate cell-level covariates or other vectors on the same response graph. This is useful for checking whether common covariates remain strongly structured after CRANE graph refinement.
+
+Run the GSC CRISPR covariate demo:
+
+```bash
+python examples/extension_response_covariates.py
+```
+
+The demo evaluates library size, cell-cycle scores, phase, and batch labels.
+
+Example output:
+
+| feature | response_score | gene_self_cor | gene_label_cor |
+| --- | --- | --- | --- |
+| phase_G1 | 0.128 | -0.001 | 0.128 |
+| S_score | 0.116 | -0.024 | 0.114 |
+| phase_G2M | 0.103 | -0.001 | -0.103 |
+| n_genes | 0.073 | -0.028 | -0.067 |
+| G2M_score | 0.038 | -0.021 | -0.032 |
+
+## Quick Start (Functional response)
+
+The functional demo uses Erlotinib drug perturbation data and two test gene sets, `MAPK` and `EGFR`, which are directly relevant to the drug-response example.
 
 ![CRANE function response overview](assets/crane_function_response_fig5a.png)
 
+Run:
+
+```bash
+python examples/function_response_erlotinib.py
+```
+
+Python API:
+
 ```python
-gene_sets = {
-    "MAPK_program": ["KRAS", "RAF1", "MAPK1", "MAPK3", "DUSP6"],
-}
+import json
+import scanpy as sc
+import crane
+
+adata = sc.read_h5ad("demo_workspace/data/demo_erlotinib_drug.h5ad")
+gene_sets = json.load(open("demo_data/erlotinib_mapk_egfr_genesets.json"))["gene_sets"]
+
+gene_result = crane.tl.gene_response(
+    adata,
+    perturbation_key="perturbation_targets",
+    control_value="nc",
+    case_value="sensi",
+    layer="log1p_norm",
+    inplace=False,
+)
 
 function_result = crane.tl.function_response(
     adata,
-    result=result,
+    result=gene_result,
     gene_set=gene_sets,
-    layer="log_norm",
+    layer="log1p_norm",
+    set_min_genes_count=10,
 )
 
 function_result.summary().head()
 ```
 
-For a simple first demo, we recommend starting with a small pathway subset such as `MAPK` and `EGFR` rather than showing all PROGENy pathways at once.
+Example output:
 
-## Command Line Usage
+| feature | response_score | gene_self_cor | gene_label_cor | gene_call |
+| --- | --- | --- | --- | --- |
+| EGFR_mode1 | 0.768 | 0.556 | 0.529 | 28 |
+| MAPK_mode2 | 0.626 | 0.448 | 0.438 | 34 |
+| MAPK_mode1 | 0.518 | 0.335 | 0.394 | 41 |
+| EGFR_mode3 | 0.278 | 0.125 | 0.249 | 32 |
+| MAPK_mode4 | 0.239 | 0.112 | 0.211 | 27 |
 
-Run gene response from an `.h5ad` file:
+## Demo Workspace
 
-```bash
-python -m crane run \
-  --input-h5ad your_data.h5ad \
-  --perturbation-key perturbation \
-  --control-value control \
-  --case-value KRAS-G12D \
-  --layer log_norm \
-  --output-dir crane_output
-```
+The demo data in this repository is stored as compressed AnnData components, not as the original large `.h5ad` files.
 
-Other commands:
+Create the local demo workspace:
 
 ```bash
-python -m crane cell-response --help
-python -m crane function-response --help
-python -m crane extension-response --help
+python examples/rebuild_demo_data.py
+python examples/scanpy_warmup.py
 ```
 
-## Demo Data
-
-This repository includes compressed demo-data components rather than the original large `.h5ad` files. Rebuild local `.h5ad` files first:
-
-```bash
-python examples/rebuild_demo_data.py --dataset all
-```
-
-This creates:
+This writes:
 
 ```text
-data/demo_gsc.h5ad
-data/demo_drug_trace_progeny.h5ad
+demo_workspace/data/demo_gsc.h5ad
+demo_workspace/data/demo_erlotinib_drug.h5ad
+demo_workspace/scanpy/
 ```
 
-Gene and cell response demo:
-
-```bash
-python examples/quickstart.py \
-  --input-h5ad data/demo_gsc.h5ad \
-  --perturbation-key perturbation_targets \
-  --control-value control \
-  --case-value GSC \
-  --layer log1p_norm \
-  --cell-response
-```
-
-Function response demo using PROGENy MAPK and EGFR gene sets:
-
-```bash
-python examples/function_response_progeny.py \
-  --input-h5ad data/demo_drug_trace_progeny.h5ad \
-  --pathways MAPK EGFR
-```
-
-To evaluate all PROGENy pathways:
-
-```bash
-python examples/function_response_progeny.py --all-pathways
-```
-
-## Minimal Example Script
-
-See:
-
-```text
-examples/quickstart.py
-```
-
-This script runs gene response and optionally cell response on any compatible `.h5ad` file.
+After that, the demo commands in this README can be copied and run without editing paths or parameters.

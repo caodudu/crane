@@ -12,21 +12,25 @@ import crane
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-h5ad", required=True, help="Path to an input .h5ad file.")
+    parser.add_argument(
+        "--input-h5ad",
+        default="demo_workspace/data/demo_gsc.h5ad",
+        help="Path to an input .h5ad file.",
+    )
     parser.add_argument(
         "--perturbation-key",
-        required=True,
+        default="perturbation_targets",
         help="Column in adata.obs containing perturbation labels.",
     )
-    parser.add_argument("--control-value", required=True, help="Control label value.")
+    parser.add_argument("--control-value", default="control", help="Control label value.")
     parser.add_argument(
         "--case-value",
-        default=None,
-        help="Perturbation label to analyze. Optional only when there is one non-control label.",
+        default="GSC",
+        help="Perturbation label to analyze. Omit only when there is one non-control label.",
     )
     parser.add_argument(
         "--layer",
-        default=None,
+        default="log1p_norm",
         help="Expression layer to use. Omit to use adata.X.",
     )
     parser.add_argument(

@@ -8,35 +8,34 @@ The original development `.h5ad` files contain repeated expression layers and ma
 - minimal `obs`
 - gene names
 - dataset manifest
-- PROGENy top-200 gene-set JSON
+- MAPK and EGFR test gene-set JSON
 
 Rebuild local demo files:
 
 ```bash
-python examples/rebuild_demo_data.py --dataset all
+python examples/rebuild_demo_data.py
+python examples/scanpy_warmup.py
 ```
 
 This writes:
 
 ```text
-data/demo_gsc.h5ad
-data/demo_drug_trace_progeny.h5ad
+demo_workspace/data/demo_gsc.h5ad
+demo_workspace/data/demo_erlotinib_drug.h5ad
+demo_workspace/scanpy/
 ```
 
 Recommended demos:
 
 ```bash
 python examples/quickstart.py \
-  --input-h5ad data/demo_gsc.h5ad \
-  --perturbation-key perturbation_targets \
-  --control-value control \
-  --case-value GSC \
-  --layer log1p_norm \
   --cell-response
 ```
 
 ```bash
-python examples/function_response_progeny.py \
-  --input-h5ad data/demo_drug_trace_progeny.h5ad \
-  --pathways MAPK EGFR
+python examples/extension_response_covariates.py
+```
+
+```bash
+python examples/function_response_erlotinib.py
 ```
