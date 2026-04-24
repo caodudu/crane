@@ -19,9 +19,9 @@ from ..step1.step1 import _compute_sp_moran_between
 from ..step2.kernels import (
     adaptive_knn,
     compute_distance_cosine,
-    heat_kernel_smoothing,
+    contextual_smoothing,
     label_nh_prop_moran,
-    overlay_raw_exp,
+    response_signal_blending,
     pca_select,
     scanpy_gaussian_weighting,
 )
@@ -329,8 +329,8 @@ def _build_reconstructed_result_space(
     dist = compute_distance_cosine(cell_dc, normalized=True)
     adjacency = adaptive_knn(dist, n_neighbors=cell_k, delta=-0.5)
     affinity_dense = scanpy_gaussian_weighting(dist, adjacency, k=cell_k).astype(np.float32, copy=False)
-    exp_denoised = heat_kernel_smoothing(affinity_dense, exp_last, beta=smooth_alpha).astype(np.float32, copy=False)
-    exp_mixed = overlay_raw_exp(
+    exp_denoised = contextual_smoothing(affinity_dense, exp_last, beta=smooth_alpha).astype(np.float32, copy=False)
+    exp_mixed = response_signal_blending(
         exp_raw=exp_raw,
         exp_last=exp_last,
         f_exp_last=exp_denoised,
@@ -345,7 +345,7 @@ def _build_reconstructed_result_space(
         label_last=label_last,
         fs_mask=fs_mask.astype(np.int8),
     ).astype(np.float32, copy=False)
-    label_mixed = overlay_raw_exp(
+    label_mixed = response_signal_blending(
         exp_raw=label_raw,
         exp_last=label_last,
         f_exp_last=label_smooth,

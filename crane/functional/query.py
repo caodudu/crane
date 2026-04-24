@@ -15,7 +15,7 @@ from sklearn.decomposition import PCA
 from ..step1.step1 import _compute_sp_moran_between
 from ..internal.logger import CRANELogger
 from ..io.schema import LoggerConfig
-from ..step2.kernels import heat_kernel_smoothing, overlay_raw_exp
+from ..step2.kernels import contextual_smoothing, response_signal_blending
 
 
 @dataclass
@@ -195,12 +195,12 @@ def _adapt_extra_features(
     exp_raw = centered.to_numpy(dtype=np.float32)
     exp_last = exp_raw.copy()
     for round_idx in range(1, iter_rounds + 1):
-        exp_denoised = heat_kernel_smoothing(
+        exp_denoised = contextual_smoothing(
             adj_matrix=affinity,
             property_matrix=exp_last,
             beta=kernel_alpha,
         ).astype(np.float32, copy=False)
-        exp_last = overlay_raw_exp(
+        exp_last = response_signal_blending(
             exp_raw=exp_raw,
             exp_last=exp_last,
             f_exp_last=exp_denoised,
