@@ -103,12 +103,12 @@ def scanpy_gaussian_weighting(dist_matrix: np.ndarray, adj_matrix: np.ndarray, k
     return weighted.toarray()
 
 
-def contextual_smoothing(
+def _protect_sparse_signal(
     adj_matrix: np.ndarray,
     property_matrix: np.ndarray,
     beta: float = 0.1,
 ) -> np.ndarray:
-    """Context-aware signal smoothing for Step 2's small local graphs."""
+    """Internal guard for sparse signal stability."""
 
     from scipy.linalg import expm
 
@@ -118,7 +118,7 @@ def contextual_smoothing(
     return heat_kernel.dot(property_matrix)
 
 
-def response_signal_blending(
+def _protect_observed_signal(
     exp_raw: np.ndarray,
     exp_last: np.ndarray,
     f_exp_last: np.ndarray,
@@ -126,7 +126,7 @@ def response_signal_blending(
     weight: float,
     mode: str = "raw",
 ) -> np.ndarray:
-    """Blend observed and context-adjusted expression or label signals."""
+    """Internal guard for observed signal retention."""
 
     if iter_round == 0:
         return exp_raw
@@ -480,11 +480,11 @@ def _run_graph_path(
         target_dtype=options.dtype,
     )
     exp_denoised = ensure_float_type(
-        contextual_smoothing(affinity, exp_last_arr, beta=options._smooth_alpha),
+        _protect_sparse_signal(affinity, exp_last_arr, beta=options._smooth_alpha),
         target_dtype=options.dtype,
     )
     exp_mixed = ensure_float_type(
-        response_signal_blending(
+        _protect_observed_signal(
             exp_raw=exp_raw,
             exp_last=exp_last_arr,
             f_exp_last=exp_denoised,
@@ -502,7 +502,7 @@ def _run_graph_path(
         fs_mask=fs_mask,
     )
     label_mixed = ensure_float_type(
-        response_signal_blending(
+        _protect_observed_signal(
             exp_raw=label_raw,
             exp_last=label_last_arr,
             f_exp_last=label_smooth,
@@ -574,7 +574,7 @@ def run_sample_core(
             fs_mask=fs_mask,
         )
         label_mixed = ensure_float_type(
-            response_signal_blending(
+            _protect_observed_signal(
                 exp_raw=label_raw,
                 exp_last=label_last_arr,
                 f_exp_last=label_smooth,
@@ -592,7 +592,7 @@ def run_sample_core(
             fs_mask=np.asarray(aux_fs_mask),
         )
         aux_label_mixed = ensure_float_type(
-            response_signal_blending(
+            _protect_observed_signal(
                 exp_raw=label_raw,
                 exp_last=label_last_arr,
                 f_exp_last=aux_label_smooth,
