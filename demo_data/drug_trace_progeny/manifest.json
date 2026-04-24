@@ -1,0 +1,27 @@
+{
+  "dataset": "drug_trace_progeny",
+  "output_h5ad": "demo_drug_trace_progeny.h5ad",
+  "shape": [
+    4372,
+    33814
+  ],
+  "expression_layer": "log1p_norm",
+  "matrix_chunks": [
+    "log1p_norm_csr.npz.part01",
+    "log1p_norm_csr.npz.part02"
+  ],
+  "obs_file": "obs.csv.gz",
+  "var_names_file": "var_names.txt.gz",
+  "gene_sets_file": "../progeny_model_human_top200_genesets.json",
+  "perturbation_key": "perturbation_targets",
+  "control_value": "nc",
+  "case_value": "sensi",
+  "default_pathways": [
+    "MAPK",
+    "EGFR"
+  ],
+  "recommended_for": [
+    "function_response",
+    "extension_response(gene_set)"
+  ]
+}

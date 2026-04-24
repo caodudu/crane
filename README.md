@@ -112,6 +112,8 @@ function_result = crane.tl.function_response(
 function_result.summary().head()
 ```
 
+For a simple first demo, we recommend starting with a small pathway subset such as `MAPK` and `EGFR` rather than showing all PROGENy pathways at once.
+
 ## Command Line Usage
 
 Run gene response from an `.h5ad` file:
@@ -136,30 +138,44 @@ python -m crane extension-response --help
 
 ## Demo Data
 
-The example datasets used during development are real `.h5ad` perturbation datasets and are larger than 100 MB, so they should not be stored directly in the git repository.
+This repository includes compressed demo-data components rather than the original large `.h5ad` files. Rebuild local `.h5ad` files first:
 
-Recommended local layout:
-
-```text
-crane/
-  data/
-    demo_gsc.h5ad
-    demo_mixl1.h5ad
-  examples/
-    quickstart.py
+```bash
+python examples/rebuild_demo_data.py --dataset all
 ```
 
-Recommended use:
+This creates:
+
+```text
+data/demo_gsc.h5ad
+data/demo_drug_trace_progeny.h5ad
+```
+
+Gene and cell response demo:
 
 ```bash
 python examples/quickstart.py \
   --input-h5ad data/demo_gsc.h5ad \
   --perturbation-key perturbation_targets \
   --control-value control \
-  --case-value GSC
+  --case-value GSC \
+  --layer log1p_norm \
+  --cell-response
 ```
 
-For public distribution, place demo `.h5ad` files in GitHub Releases or Zenodo, and keep only scripts and instructions in this repository. This keeps `git clone` fast while still giving users a reproducible local test.
+Function response demo using PROGENy MAPK and EGFR gene sets:
+
+```bash
+python examples/function_response_progeny.py \
+  --input-h5ad data/demo_drug_trace_progeny.h5ad \
+  --pathways MAPK EGFR
+```
+
+To evaluate all PROGENy pathways:
+
+```bash
+python examples/function_response_progeny.py --all-pathways
+```
 
 ## Minimal Example Script
 

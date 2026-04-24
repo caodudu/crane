@@ -1,0 +1,19 @@
+{
+  "dataset": "gsc",
+  "output_h5ad": "demo_gsc.h5ad",
+  "shape": [
+    1220,
+    9746
+  ],
+  "expression_layer": "log1p_norm",
+  "matrix_file": "log1p_norm_csr.npz",
+  "obs_file": "obs.csv.gz",
+  "var_names_file": "var_names.txt.gz",
+  "perturbation_key": "perturbation_targets",
+  "control_value": "control",
+  "case_value": "GSC",
+  "recommended_for": [
+    "gene_response",
+    "cell_response"
+  ]
+}
