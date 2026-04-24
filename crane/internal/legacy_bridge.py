@@ -1,1 +1,1 @@
-"""Legacy bridge placeholders for future migration from couture to crane."""
+"""Internal bridge hooks reserved for controlled compatibility work."""

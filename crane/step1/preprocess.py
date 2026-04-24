@@ -1,8 +1,4 @@
-"""Input and preprocessing contracts for CRANE.
-
-This module defines the first internal boundary of the paper-aligned CRANE
-pipeline. It does not import or execute the legacy ``script/couture`` package.
-"""
+"""Input contracts and baseline preprocessing helpers for CRANE."""
 
 from __future__ import annotations
 
@@ -27,7 +23,7 @@ class InputContract:
 
 @dataclass(frozen=True)
 class PreprocessOptions:
-    """Low-visibility preprocessing options reserved for the migration layer."""
+    """Low-visibility preprocessing options for the baseline Step 1 path."""
 
     batch_key: str | None = None
     min_cells: int = 0
@@ -128,9 +124,8 @@ def prepare_input(
 ) -> PreparedInput:
     """Validate the CRANE input boundary and return a prepared package.
 
-    The legacy preprocessing algorithm is intentionally not wired here yet.
-    This function only checks the public-to-core contract and records metadata
-    needed by later stages.
+    This function validates the public-to-core contract, prepares the baseline
+    expression layer, and records the metadata needed by later stages.
     """
 
     options = options or PreprocessOptions()
@@ -156,7 +151,7 @@ def prepare_input(
         raise ValueError("case group does not meet min_cells requirement.")
     if options.preprocess_mode not in {"baseline", "no_correct"}:
         raise NotImplementedError(
-            "The formal Step1 mainline currently supports only the baseline preprocessing path."
+            "Step 1 currently supports only the baseline preprocessing path."
         )
     step1_adata = _copy_step1_adata(adata, expression_layer=expression_layer)
     step1_adata = _run_baseline_preprocess(step1_adata, expression_layer=expression_layer)

@@ -1,4 +1,4 @@
-"""Step 2 ndarray-first contracts for the default no-module CRANE mainline."""
+"""Step 2 ndarray-first contracts for the default CRANE pipeline."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Step2Options:
-    """Default Step 2 controls aligned to the legacy no-module mainline."""
+    """Default Step 2 controls for the current CRANE path."""
 
     n_pcs: int = 50
     cell_k: int = 10
@@ -53,7 +53,7 @@ class Step2SamplePack:
     label_raw: np.ndarray
     fs_mask: np.ndarray
     group_labels: np.ndarray
-    guide_fs_mask: np.ndarray | None = None
+    aux_fs_mask: np.ndarray | None = None
     sample_id: str | None = None
     control_cells: Sequence[Any] = field(default_factory=tuple)
     case_cells: Sequence[Any] = field(default_factory=tuple)
@@ -70,24 +70,24 @@ class Step2SampleOutput:
     gene_label_cor: np.ndarray
     combined_score: np.ndarray
     norm_combined_score: np.ndarray
-    guide_pass_next: bool | None = None
+    branch_ready_next: bool | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class Step2State:
-    """Minimal cross-iteration state for the default Step 2 mainline."""
+    """Minimal cross-iteration state for the default Step 2 path."""
 
     exp_last_list: tuple[np.ndarray | None, ...]
     label_last_list: tuple[np.ndarray | None, ...]
     ri_mask: np.ndarray
-    guide_pass_list: tuple[bool, ...] = field(default_factory=tuple)
+    branch_ready_list: tuple[bool, ...] = field(default_factory=tuple)
     iteration: int = 0
 
 
 @dataclass(frozen=True)
 class Step2RunResult:
-    """Step 2 serial baseline result."""
+    """Step 2 result package shared by the serial and threaded runners."""
 
     state: Step2State
     sample_outputs: tuple[Step2SampleOutput, ...]

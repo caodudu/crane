@@ -27,13 +27,13 @@ class WeightedSample:
 
     control_cells: Sequence[Any]
     case_cells: Sequence[Any]
-    pseudo_case_cells: Sequence[Any] = field(default_factory=tuple)
+    reserve_case_cells: Sequence[Any] = field(default_factory=tuple)
     sample_id: str | None = None
 
 
 @dataclass(frozen=True)
 class SamplingOptions:
-    """Step 1 options with paper-facing names and hidden legacy hooks."""
+    """Step 1 sampling controls kept out of the main public API."""
 
     n_cells: int = 50
     n_subsamples: int = 5
@@ -52,7 +52,7 @@ class SamplingPlan:
     control_control_samples: Sequence[WeightedSample] = field(default_factory=tuple)
     working_adata: Any = None
     init_feature_selection: Any = None
-    guide_feature_selection: Any = None
+    aux_feature_selection: Any = None
     margin_evaluation: Any = None
     options: SamplingOptions = field(default_factory=SamplingOptions)
 
@@ -85,7 +85,7 @@ def process_sampling_weights(
     return pd.Series(normalized_weights, index=case_neighbor_proportions.index)
 
 
-def _weighted_rswr_samples(
+def _build_weighted_samples(
     adata: Any,
     cell_weight: pd.Series,
     group_obs: str,
@@ -140,16 +140,16 @@ def build_sampling_plan(
     options: SamplingOptions | None = None,
     working_adata: Any = None,
     init_feature_selection: Any = None,
-    guide_feature_selection: Any = None,
+    aux_feature_selection: Any = None,
     margin_evaluation: Any = None,
 ) -> SamplingPlan:
-    """Create the Step 1 weighted sampling handoff."""
+    """Create the Step 1 weighted sampling package."""
 
     options = options or SamplingOptions()
     control_case_samples: Sequence[WeightedSample] = ()
     if tendency is not None and working_adata is not None:
         tendency_values = pd.Series(tendency.values, index=working_adata.obs_names)
-        control_case_samples = _weighted_rswr_samples(
+        control_case_samples = _build_weighted_samples(
             adata=working_adata,
             cell_weight=np.clip(tendency_values, 0, 1),
             group_obs=prepared_input.contract.perturbation_key,
@@ -165,7 +165,7 @@ def build_sampling_plan(
         control_case_samples=control_case_samples,
         working_adata=working_adata,
         init_feature_selection=init_feature_selection,
-        guide_feature_selection=guide_feature_selection,
+        aux_feature_selection=aux_feature_selection,
         margin_evaluation=margin_evaluation,
         options=options,
     )
@@ -176,6 +176,5 @@ def require_sampled_cells(plan: SamplingPlan) -> None:
 
     if not plan.control_case_samples:
         raise NotImplementedError(
-            "Step 1 weighted multi-sampling is not migrated yet. "
-            "SamplingPlan defines the internal contract, but contains no samples."
+            "Step 1 sampling did not produce any control-case sample sets."
         )

@@ -1,4 +1,4 @@
-"""Serial Step 2 runner for the default ndarray-first mainline."""
+"""Step 2 runners for the default ndarray-first CRANE pipeline."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from ..core.sampling import SamplingPlan, WeightedSample, require_sampled_cells
+from ..step1.sampling import SamplingPlan, WeightedSample, require_sampled_cells
 from .contracts import (
     Step2Options,
     Step2RunResult,
@@ -27,11 +27,7 @@ def _build_result_space_identity(
     score_history: Sequence[np.ndarray],
     response_identity: np.ndarray,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Build the internal Step2->result-space handoff identity.
-
-    Step2 should hand off the converged identity directly. Extra history-based
-    rescue belongs in diagnostics, not in the default runtime contract.
-    """
+    """Build the result-space identity carried out of Step 2."""
 
     base_identity = np.asarray(response_identity, dtype=bool)
     return base_identity.astype(np.int8), {
@@ -42,7 +38,7 @@ def _build_result_space_identity(
 
 
 def _select_representative_sample_indices(score_columns: np.ndarray, n: int = 3) -> tuple[int, ...]:
-    """Mirror the legacy representative-sample selection on score columns."""
+    """Select representative samples from the per-sample score columns."""
 
     score_columns = np.asarray(score_columns, dtype=np.float64)
     if score_columns.ndim != 2:
@@ -76,16 +72,16 @@ def _resolve_threshold_k(
     *,
     base_threshold_k: float,
     total_input_genes: int,
-    weak_pert: bool,
+    relax_trigger: bool,
     options: Step2Options,
 ) -> tuple[float, bool, bool]:
-    """Optionally relax RI threshold under the legacy weak-perturbation guard."""
+    """Optionally relax the RI threshold under the current Step 2 stability guard."""
 
     if not options._relaxed_threshold_on_weak_pert:
         return float(base_threshold_k), False, False
 
     small_input_gene_pool = total_input_genes < (options.max_iterations * 10)
-    if weak_pert or small_input_gene_pool:
+    if relax_trigger or small_input_gene_pool:
         relaxed_k = float(base_threshold_k) * float(options._relaxed_threshold_scale)
         if options._relaxed_threshold_min_k is not None:
             relaxed_k = max(relaxed_k, float(options._relaxed_threshold_min_k))
@@ -100,7 +96,7 @@ def _resolve_update_stage(
     next_ri: np.ndarray,
     delta_threshold: int,
 ) -> tuple[str, np.ndarray | None]:
-    """Mirror legacy strict/wave stage switching using active-count deltas."""
+    """Switch between strict and wave stages using active-count deltas."""
 
     nondeg_delta = int(np.sum(previous_ri)) - int(np.sum(next_ri))
     if nondeg_delta <= delta_threshold:
@@ -155,7 +151,7 @@ def pack_sample(sample_input: Step2SampleInput, fs_mask: Any) -> Step2SamplePack
 
 
 def _coerce_feature_mask(fs_mask: Any) -> np.ndarray:
-    """Accept legacy/new Step 1 masks without depending on either caller shape."""
+    """Accept Step 1 masks without depending on a single caller shape."""
 
     if hasattr(fs_mask, "columns"):
         if "i_0" in fs_mask.columns:
@@ -187,10 +183,10 @@ def _coerce_feature_mask(fs_mask: Any) -> np.ndarray:
 def prepare_step2_packs(
     sampling_plan: SamplingPlan,
     fs_input: Any | None = None,
-    guide_fs_input: Any | None = None,
+    aux_fs_input: Any | None = None,
     sample_layer: str | None = None,
 ) -> tuple[Step2SamplePack, ...]:
-    """Create compact Step 2 packs from a Step 1-like sampling handoff."""
+    """Create compact Step 2 packs from the Step 1 sampling plan."""
 
     require_sampled_cells(sampling_plan)
     if sampling_plan.working_adata is None:
@@ -199,8 +195,8 @@ def prepare_step2_packs(
         fs_input = sampling_plan.init_feature_selection
     if fs_input is None:
         raise ValueError("Step 2 requires an initial feature-selection mask.")
-    if guide_fs_input is None:
-        guide_fs_input = sampling_plan.guide_feature_selection
+    if aux_fs_input is None:
+        aux_fs_input = sampling_plan.aux_feature_selection
 
     working_adata = sampling_plan.working_adata
     layer_name = sample_layer
@@ -215,7 +211,7 @@ def prepare_step2_packs(
         build_sample_input(sample, expression_matrix=expression_matrix, obs_names=working_adata.obs_names)
         for sample in sampling_plan.control_case_samples
     ]
-    guide_fs_array = _coerce_feature_mask(guide_fs_input) if guide_fs_input is not None else None
+    aux_fs_array = _coerce_feature_mask(aux_fs_input) if aux_fs_input is not None else None
     packs: list[Step2SamplePack] = []
     for sample_input in sample_inputs:
         pack = pack_sample(sample_input, fs_mask=fs_input)
@@ -225,7 +221,7 @@ def prepare_step2_packs(
                 label_raw=pack.label_raw,
                 fs_mask=pack.fs_mask,
                 group_labels=pack.group_labels,
-                guide_fs_mask=guide_fs_array,
+                aux_fs_mask=aux_fs_array,
                 sample_id=pack.sample_id,
                 control_cells=pack.control_cells,
                 case_cells=pack.case_cells,
@@ -243,9 +239,37 @@ def initial_step2_state(sample_count: int, ri_mask: Any) -> Step2State:
     return Step2State(
         exp_last_list=tuple([None] * sample_count),
         label_last_list=tuple([None] * sample_count),
-        guide_pass_list=tuple([False] * sample_count),
+        branch_ready_list=tuple([False] * sample_count),
         ri_mask=ri_array,
         iteration=0,
+    )
+
+
+def _build_iteration_options(options: Step2Options, iteration: int) -> Step2Options:
+    """Clone Step 2 options while recording the current iteration number."""
+
+    return Step2Options(
+        n_pcs=options.n_pcs,
+        cell_k=options.cell_k,
+        max_iterations=options.max_iterations,
+        stable_rounds=options.stable_rounds,
+        score_mode=options.score_mode,
+        threshold_k=options.threshold_k,
+        drop_limit=options.drop_limit,
+        dtype=options.dtype,
+        force_connect=options.force_connect,
+        _smooth_weight=options._smooth_weight,
+        _smooth_alpha=options._smooth_alpha,
+        _binary_delta_threshold=options._binary_delta_threshold,
+        _guide_compare_rounds=options._guide_compare_rounds,
+        _relaxed_threshold_on_weak_pert=options._relaxed_threshold_on_weak_pert,
+        _relaxed_threshold_latch_weak_pert=options._relaxed_threshold_latch_weak_pert,
+        _relaxed_threshold_min_k=options._relaxed_threshold_min_k,
+        _relaxed_threshold_scale=options._relaxed_threshold_scale,
+        _legacy_wave_compare=options._legacy_wave_compare,
+        _legacy_wave_delta_threshold=options._legacy_wave_delta_threshold,
+        _legacy_post_stable_rounds=options._legacy_post_stable_rounds,
+        extras={**dict(options.extras), "iteration": iteration},
     )
 
 
@@ -255,20 +279,20 @@ def run_step2_serial(
     options: Step2Options | None = None,
     initial_state: Step2State | None = None,
 ) -> Step2RunResult:
-    """Run the default no-module Step 2 RI-refinement loop as a serial baseline."""
+    """Run the default Step 2 RI-refinement loop in serial mode."""
 
     options = options or Step2Options()
     if not packs:
         raise ValueError("At least one Step 2 sample pack is required.")
     max_iterations = options.max_iterations if iterations is None else iterations
     if max_iterations < 1:
-        raise ValueError("iterations must be >= 1")
+        raise ValueError("iterations must be >= 1.")
     initial_ri = packs[0].fs_mask
     state = initial_state or initial_step2_state(len(packs), initial_ri)
     if (
         len(state.exp_last_list) != len(packs)
         or len(state.label_last_list) != len(packs)
-        or len(state.guide_pass_list) != len(packs)
+        or len(state.branch_ready_list) != len(packs)
     ):
         raise ValueError("Initial Step2State length must match packs length.")
     if state.ri_mask.shape[0] != packs[0].exp_raw.shape[1]:
@@ -278,7 +302,7 @@ def run_step2_serial(
     sample_outputs: tuple[Step2SampleOutput, ...] = ()
     exp_last_list = list(state.exp_last_list)
     label_last_list = list(state.label_last_list)
-    guide_pass_list = list(state.guide_pass_list)
+    branch_ready_list = list(state.branch_ready_list)
     ri_mask = np.asarray(state.ri_mask, dtype=bool).copy()
     stable_count = 0
     stable_tail_count = 0
@@ -299,49 +323,29 @@ def run_step2_serial(
                 label_raw=pack.label_raw,
                 fs_mask=ri_mask,
                 group_labels=pack.group_labels,
-                guide_fs_mask=pack.guide_fs_mask,
+                aux_fs_mask=pack.aux_fs_mask,
                 sample_id=pack.sample_id,
                 control_cells=pack.control_cells,
                 case_cells=pack.case_cells,
             )
-            iter_options = Step2Options(
-                n_pcs=options.n_pcs,
-                cell_k=options.cell_k,
-                max_iterations=options.max_iterations,
-                stable_rounds=options.stable_rounds,
-                score_mode=options.score_mode,
-                threshold_k=options.threshold_k,
-                drop_limit=options.drop_limit,
-                dtype=options.dtype,
-                force_connect=options.force_connect,
-                _smooth_weight=options._smooth_weight,
-                _smooth_alpha=options._smooth_alpha,
-                _binary_delta_threshold=options._binary_delta_threshold,
-                _guide_compare_rounds=options._guide_compare_rounds,
-                _relaxed_threshold_on_weak_pert=options._relaxed_threshold_on_weak_pert,
-                _relaxed_threshold_latch_weak_pert=options._relaxed_threshold_latch_weak_pert,
-                _relaxed_threshold_min_k=options._relaxed_threshold_min_k,
-                _relaxed_threshold_scale=options._relaxed_threshold_scale,
-                _legacy_post_stable_rounds=options._legacy_post_stable_rounds,
-                extras={**dict(options.extras), "iteration": state.iteration + iter_offset + 1},
-            )
+            iter_options = _build_iteration_options(options, state.iteration + iter_offset + 1)
             next_outputs.append(
                 run_sample_core(
                     pack=iter_pack,
                     exp_last=exp_last_list[sample_idx],
                     label_last=label_last_list[sample_idx],
-                    guide_pass=guide_pass_list[sample_idx],
+                    branch_ready=branch_ready_list[sample_idx],
                     options=iter_options,
                 )
             )
         exp_last_list = [output.exp_last_next for output in next_outputs]
         label_last_list = [output.label_last_next for output in next_outputs]
-        guide_pass_list = [bool(output.guide_pass_next) for output in next_outputs]
+        branch_ready_list = [bool(output.branch_ready_next) for output in next_outputs]
         sample_outputs = tuple(next_outputs)
-        weak_pert = not all(bool(v) for v in guide_pass_list)
-        if options._relaxed_threshold_latch_weak_pert and weak_pert:
+        relax_trigger = not all(bool(v) for v in branch_ready_list)
+        if options._relaxed_threshold_latch_weak_pert and relax_trigger:
             weak_pert_latched = True
-        weak_pert_effective = weak_pert_latched or weak_pert
+        weak_pert_effective = weak_pert_latched or relax_trigger
         response_score = np.mean(
             np.vstack([output.norm_combined_score for output in sample_outputs]),
             axis=0,
@@ -350,7 +354,7 @@ def run_step2_serial(
         threshold_k_iter, threshold_relaxed, small_input_gene_pool = _resolve_threshold_k(
             base_threshold_k=options.threshold_k,
             total_input_genes=int(packs[0].exp_raw.shape[1]),
-            weak_pert=weak_pert_effective,
+            relax_trigger=weak_pert_effective,
             options=options,
         )
         if options._legacy_wave_compare:
@@ -373,7 +377,7 @@ def run_step2_serial(
         update_meta["threshold_relaxed"] = bool(threshold_relaxed)
         update_meta["small_input_gene_pool"] = bool(small_input_gene_pool)
         update_meta["total_input_genes"] = int(packs[0].exp_raw.shape[1])
-        update_meta["weak_pert"] = bool(weak_pert)
+        update_meta["weak_pert"] = bool(relax_trigger)
         update_meta["weak_pert_effective"] = bool(weak_pert_effective)
         update_meta["stage_before"] = str(update_stage)
         next_stage, next_fs_strict = _resolve_update_stage(
@@ -410,7 +414,7 @@ def run_step2_serial(
     final_state = Step2State(
         exp_last_list=tuple(exp_last_list),
         label_last_list=tuple(label_last_list),
-        guide_pass_list=tuple(guide_pass_list),
+        branch_ready_list=tuple(branch_ready_list),
         ri_mask=ri_mask,
         iteration=state.iteration + len(iter_times),
     )
@@ -419,7 +423,7 @@ def run_step2_serial(
         np.vstack([output.norm_combined_score for output in sample_outputs]).T,
         n=3,
     )
-    result_space_identity, handoff_meta = _build_result_space_identity(
+    result_space_identity, result_space_meta = _build_result_space_identity(
         ri_history=tuple(ri_history),
         score_history=tuple(score_history),
         response_identity=ri_mask,
@@ -448,7 +452,7 @@ def run_step2_serial(
             "final_fs_strict_active": int(np.sum(fs_strict_mask)) if fs_strict_mask is not None else 0,
             "result_space_identity_active_genes": int(np.sum(result_space_identity)),
             "representative_sample_indices": tuple(int(i) for i in representative_sample_indices),
-            "result_space_handoff": handoff_meta,
+            "result_space_handoff": result_space_meta,
             "update_history": update_history,
         },
     )
@@ -473,12 +477,12 @@ def run_step2_threaded(
         raise ValueError("At least one Step 2 sample pack is required.")
     max_iterations = options.max_iterations if iterations is None else iterations
     if max_iterations < 1:
-        raise ValueError("iterations must be >= 1")
+        raise ValueError("iterations must be >= 1.")
     state = initial_state or initial_step2_state(len(packs), packs[0].fs_mask)
     if (
         len(state.exp_last_list) != len(packs)
         or len(state.label_last_list) != len(packs)
-        or len(state.guide_pass_list) != len(packs)
+        or len(state.branch_ready_list) != len(packs)
     ):
         raise ValueError("Initial Step2State length must match packs length.")
 
@@ -486,7 +490,7 @@ def run_step2_threaded(
     sample_outputs: tuple[Step2SampleOutput, ...] = ()
     exp_last_list = list(state.exp_last_list)
     label_last_list = list(state.label_last_list)
-    guide_pass_list = list(state.guide_pass_list)
+    branch_ready_list = list(state.branch_ready_list)
     ri_mask = np.asarray(state.ri_mask, dtype=bool).copy()
     stable_count = 0
     stable_tail_count = 0
@@ -501,27 +505,7 @@ def run_step2_threaded(
     with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for iter_offset in range(max_iterations):
             start = time.perf_counter()
-            iter_options = Step2Options(
-                n_pcs=options.n_pcs,
-                cell_k=options.cell_k,
-                max_iterations=options.max_iterations,
-                stable_rounds=options.stable_rounds,
-                score_mode=options.score_mode,
-                threshold_k=options.threshold_k,
-                drop_limit=options.drop_limit,
-                dtype=options.dtype,
-                force_connect=options.force_connect,
-                _smooth_weight=options._smooth_weight,
-                _smooth_alpha=options._smooth_alpha,
-                _binary_delta_threshold=options._binary_delta_threshold,
-                _guide_compare_rounds=options._guide_compare_rounds,
-                _relaxed_threshold_on_weak_pert=options._relaxed_threshold_on_weak_pert,
-                _relaxed_threshold_latch_weak_pert=options._relaxed_threshold_latch_weak_pert,
-                _relaxed_threshold_min_k=options._relaxed_threshold_min_k,
-                _relaxed_threshold_scale=options._relaxed_threshold_scale,
-                _legacy_post_stable_rounds=options._legacy_post_stable_rounds,
-                extras={**dict(options.extras), "iteration": state.iteration + iter_offset + 1},
-            )
+            iter_options = _build_iteration_options(options, state.iteration + iter_offset + 1)
             tasks = [
                 (
                     Step2SamplePack(
@@ -529,14 +513,14 @@ def run_step2_threaded(
                         label_raw=pack.label_raw,
                         fs_mask=ri_mask,
                         group_labels=pack.group_labels,
-                        guide_fs_mask=pack.guide_fs_mask,
+                        aux_fs_mask=pack.aux_fs_mask,
                         sample_id=pack.sample_id,
                         control_cells=pack.control_cells,
                         case_cells=pack.case_cells,
                     ),
                     exp_last_list[sample_idx],
                     label_last_list[sample_idx],
-                    guide_pass_list[sample_idx],
+                    branch_ready_list[sample_idx],
                     iter_options,
                 )
                 for sample_idx, pack in enumerate(packs)
@@ -544,12 +528,12 @@ def run_step2_threaded(
             next_outputs = list(executor.map(lambda args: run_sample_core(*args), tasks))
             exp_last_list = [output.exp_last_next for output in next_outputs]
             label_last_list = [output.label_last_next for output in next_outputs]
-            guide_pass_list = [bool(output.guide_pass_next) for output in next_outputs]
+            branch_ready_list = [bool(output.branch_ready_next) for output in next_outputs]
             sample_outputs = tuple(next_outputs)
-            weak_pert = not all(bool(v) for v in guide_pass_list)
-            if options._relaxed_threshold_latch_weak_pert and weak_pert:
+            relax_trigger = not all(bool(v) for v in branch_ready_list)
+            if options._relaxed_threshold_latch_weak_pert and relax_trigger:
                 weak_pert_latched = True
-            weak_pert_effective = weak_pert_latched or weak_pert
+            weak_pert_effective = weak_pert_latched or relax_trigger
             response_score = np.mean(
                 np.vstack([output.norm_combined_score for output in sample_outputs]),
                 axis=0,
@@ -558,7 +542,7 @@ def run_step2_threaded(
             threshold_k_iter, threshold_relaxed, small_input_gene_pool = _resolve_threshold_k(
                 base_threshold_k=options.threshold_k,
                 total_input_genes=int(packs[0].exp_raw.shape[1]),
-                weak_pert=weak_pert_effective,
+                relax_trigger=weak_pert_effective,
                 options=options,
             )
             if options._legacy_wave_compare:
@@ -581,7 +565,7 @@ def run_step2_threaded(
             update_meta["threshold_relaxed"] = bool(threshold_relaxed)
             update_meta["small_input_gene_pool"] = bool(small_input_gene_pool)
             update_meta["total_input_genes"] = int(packs[0].exp_raw.shape[1])
-            update_meta["weak_pert"] = bool(weak_pert)
+            update_meta["weak_pert"] = bool(relax_trigger)
             update_meta["weak_pert_effective"] = bool(weak_pert_effective)
             update_meta["stage_before"] = str(update_stage)
             next_stage, next_fs_strict = _resolve_update_stage(
@@ -618,7 +602,7 @@ def run_step2_threaded(
     final_state = Step2State(
         exp_last_list=tuple(exp_last_list),
         label_last_list=tuple(label_last_list),
-        guide_pass_list=tuple(guide_pass_list),
+        branch_ready_list=tuple(branch_ready_list),
         ri_mask=ri_mask,
         iteration=state.iteration + len(iter_times),
     )
@@ -627,7 +611,7 @@ def run_step2_threaded(
         np.vstack([output.norm_combined_score for output in sample_outputs]).T,
         n=3,
     )
-    result_space_identity, handoff_meta = _build_result_space_identity(
+    result_space_identity, result_space_meta = _build_result_space_identity(
         ri_history=tuple(ri_history),
         score_history=tuple(score_history),
         response_identity=ri_mask,
@@ -657,7 +641,7 @@ def run_step2_threaded(
             "final_fs_strict_active": int(np.sum(fs_strict_mask)) if fs_strict_mask is not None else 0,
             "result_space_identity_active_genes": int(np.sum(result_space_identity)),
             "representative_sample_indices": tuple(int(i) for i in representative_sample_indices),
-            "result_space_handoff": handoff_meta,
+            "result_space_handoff": result_space_meta,
             "update_history": update_history,
         },
     )

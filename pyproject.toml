@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crane"
 version = "0.0.1.dev0"
-description = "Early sync preview of the CRANE package."
+description = "CRANE: neighborhood-aware perturbation response analysis for single-cell data."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

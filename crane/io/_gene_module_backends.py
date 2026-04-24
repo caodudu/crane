@@ -17,8 +17,8 @@ from sklearn.neighbors import kneighbors_graph
 BackendRunner = Callable[[np.ndarray, np.ndarray, float], tuple[np.ndarray, np.ndarray | None]]
 
 _BACKEND_RUNNERS: dict[str, BackendRunner] = {}
-_LEGACY_METHODS = {"wgcna_leiden", "knn_leiden", "eva", "dynamictreecut"}
-_BUILTIN_METHODS = _LEGACY_METHODS | {"correlation_components"}
+_COMPAT_METHODS = {"wgcna_leiden", "knn_leiden", "eva", "dynamictreecut"}
+_BUILTIN_METHODS = _COMPAT_METHODS | {"correlation_components"}
 _SUPPORTED_METHODS = _BUILTIN_METHODS | {"auto"}
 
 

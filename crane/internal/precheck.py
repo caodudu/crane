@@ -15,7 +15,7 @@ def maybe_warn_step1_cold_start(
     logger: Any,
     threshold_s: float = 1.0,
 ) -> dict[str, Any]:
-    """Probe Step1 graph backend once and emit a user-facing cold-start notice if needed."""
+    """Check the Step 1 graph backend once and emit a cold-start notice if needed."""
 
     global _STEP1_GRAPH_BACKEND_CHECKED
     global _STEP1_COLD_START_REPORTED

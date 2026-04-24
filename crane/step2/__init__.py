@@ -1,4 +1,4 @@
-"""Default no-module Step 2 MVP implementation."""
+"""Default Step 2 implementation for the CRANE pipeline."""
 
 from .contracts import (
     Step2Options,

@@ -1,4 +1,4 @@
-"""Allow `python -m crane` as a future CLI entry point."""
+"""Allow ``python -m crane`` as a CLI entry point."""
 
 from .cli import main
 

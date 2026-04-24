@@ -12,9 +12,10 @@ import pandas as pd
 from scipy import sparse
 from sklearn.decomposition import PCA
 
-from ..core.step1 import _compute_sp_moran_between
+from ..step1.step1 import _compute_sp_moran_between
 from ..internal.logger import CRANELogger
 from ..io.schema import LoggerConfig
+from ..step2.kernels import heat_kernel_smoothing, overlay_raw_exp
 
 
 @dataclass
@@ -39,11 +40,26 @@ class CRANEExtensionResult:
     def summary(
         self,
         *,
+        responsive_only: bool = False,
         sort_by: str = "response_score",
         ascending: bool = False,
+        represent: str = "mean",
+        normalized: bool = False,
+        centered: bool = False,
     ) -> pd.DataFrame:
+        """Return the feature-level extension summary table.
+
+        The extra keyword arguments mirror ``CRANEResult.summary()`` so demo
+        code can switch between gene and extension/function results without
+        tripping over a different signature. Extension summaries are already
+        stored at feature level, so ``represent`` / ``normalized`` /
+        ``centered`` are accepted for API compatibility and ignored here.
+        """
+
         frame = self.extension_ad.var.copy()
         frame.index.name = "feature"
+        if responsive_only and "response_identity" in frame.columns:
+            frame = frame.loc[frame["response_identity"] == 1].copy()
         if sort_by in frame.columns:
             frame = frame.sort_values(by=sort_by, ascending=ascending)
         return frame
@@ -86,38 +102,139 @@ def _resolve_label(result_ad: ad.AnnData, label_key: str | None = None) -> tuple
     raise ValueError("result.result_ad.obs must contain label_last, label_mixed, or label_raw.")
 
 
-def _adata_expression_frame(adata: Any, layer: str | None = None) -> pd.DataFrame:
+def _result_alignment_labels(result_ad: ad.AnnData) -> pd.Index:
+    if "original_cell_id" in result_ad.obs.columns:
+        return pd.Index(result_ad.obs["original_cell_id"].astype(str), name="original_cell_id")
+    return pd.Index(result_ad.obs_names.astype(str), name="cell_id")
+
+
+def _anndata_expression_frame(
+    adata: Any,
+    *,
+    layer: str | None = None,
+    genes: set[str] | None = None,
+) -> pd.DataFrame:
     if adata is None:
-        raise ValueError("adata is required for gene-set and gene-vector extension inputs.")
-    matrix = adata.X if layer is None or layer == "X" else adata.layers[layer]
+        raise ValueError("adata is required for missing-gene supplementation.")
+
+    var_names = adata.var_names.astype(str)
+    selected = list(var_names) if genes is None else [gene for gene in var_names if gene in genes]
+    adata_view = adata[:, selected] if genes is not None else adata
+    matrix = adata_view.X if layer is None or layer == "X" else adata_view.layers[layer]
     return pd.DataFrame(
         _dense_matrix(matrix),
-        index=adata.obs_names.copy(),
-        columns=adata.var_names.copy(),
+        index=adata_view.obs_names.astype(str),
+        columns=adata_view.var_names.astype(str),
     )
 
 
-def _align_expression_to_result(
-    adata: Any,
+def _result_expression_frame(
     result_ad: ad.AnnData,
     *,
     layer: str | None = None,
     genes: set[str] | None = None,
 ) -> pd.DataFrame:
-    exp = _adata_expression_frame(adata, layer=layer)
-    if genes is not None:
-        selected = [gene for gene in exp.columns.astype(str) if gene in genes]
-        exp = exp.loc[:, selected]
-    common_cells = result_ad.obs_names.intersection(exp.index)
-    missing_cells = result_ad.obs_names.difference(exp.index)
-    aligned_parts = [exp.loc[common_cells]]
-    if len(missing_cells):
-        aligned_parts.append(pd.DataFrame(0.0, index=missing_cells, columns=exp.columns))
-    aligned = pd.concat(aligned_parts, axis=0)
-    return aligned.reindex(result_ad.obs_names).fillna(0).astype(np.float32)
+    result_var_names = result_ad.var_names.astype(str)
+    selected = list(result_var_names) if genes is None else [gene for gene in result_var_names if gene in genes]
+    if layer is None or layer == "X":
+        matrix = result_ad[:, selected].X
+    else:
+        if layer not in result_ad.layers:
+            raise ValueError(f"Requested result-space layer {layer!r} is not available.")
+        matrix = result_ad[:, selected].layers[layer]
+    return pd.DataFrame(
+        _dense_matrix(matrix),
+        index=result_ad.obs_names.astype(str),
+        columns=selected,
+    )
 
 
-def _coerce_cell_vectors(vectors: Any, result_ad: ad.AnnData) -> pd.DataFrame:
+def _align_input_features_to_result(
+    frame: pd.DataFrame,
+    result_ad: ad.AnnData,
+) -> pd.DataFrame:
+    source = frame.copy()
+    source.index = source.index.astype(str)
+    target_labels = _result_alignment_labels(result_ad)
+    aligned = source.reindex(target_labels, fill_value=0.0)
+    aligned.index = result_ad.obs_names.astype(str)
+    return aligned.astype(np.float32)
+
+
+def _resolve_extension_iterations(result_ad: ad.AnnData) -> int:
+    crane_info = dict(result_ad.uns.get("crane_info", {}))
+    run_meta = dict(crane_info.get("run", {}))
+    for key in ("iterations", "step2_iterations"):
+        value = run_meta.get(key)
+        if value is not None:
+            return max(int(value), 0)
+    return 0
+
+
+def _adapt_extra_features(
+    extra: pd.DataFrame,
+    *,
+    affinity: np.ndarray,
+    iter_rounds: int,
+    kernel_alpha: float = 0.1,
+    overlap_ratio: float = 0.2,
+) -> pd.DataFrame:
+    if extra.empty:
+        return extra.copy()
+
+    centered = extra.astype(np.float32) - extra.astype(np.float32).mean(axis=0)
+    if iter_rounds <= 0:
+        return centered.astype(np.float32)
+
+    exp_raw = centered.to_numpy(dtype=np.float32)
+    exp_last = exp_raw.copy()
+    for round_idx in range(1, iter_rounds + 1):
+        exp_denoised = heat_kernel_smoothing(
+            adj_matrix=affinity,
+            property_matrix=exp_last,
+            beta=kernel_alpha,
+        ).astype(np.float32, copy=False)
+        exp_last = overlay_raw_exp(
+            exp_raw=exp_raw,
+            exp_last=exp_last,
+            f_exp_last=exp_denoised,
+            iter_round=round_idx,
+            weight=1 - overlap_ratio,
+            mode="raw",
+        ).astype(np.float32, copy=False)
+    return pd.DataFrame(exp_last, index=extra.index.copy(), columns=extra.columns.copy())
+
+
+def _build_extension_expression(
+    adata: Any,
+    result_ad: ad.AnnData,
+    *,
+    affinity: np.ndarray,
+    layer: str | None = None,
+    genes: set[str] | None = None,
+) -> pd.DataFrame:
+    core = _result_expression_frame(result_ad, genes=genes)
+    if genes is None:
+        return core.astype(np.float32)
+
+    missing = [gene for gene in genes if gene not in core.columns]
+    if not missing:
+        return core.astype(np.float32)
+
+    extra_input = _anndata_expression_frame(adata, layer=layer, genes=set(missing))
+    aligned_extra = _align_input_features_to_result(extra_input, result_ad)
+    adapted_extra = _adapt_extra_features(
+        aligned_extra,
+        affinity=affinity,
+        iter_rounds=_resolve_extension_iterations(result_ad),
+    )
+    supplement_cols = [gene for gene in missing if gene in adapted_extra.columns]
+    if supplement_cols:
+        core = pd.concat([core, adapted_extra.loc[:, supplement_cols]], axis=1)
+    return core.astype(np.float32)
+
+
+def _coerce_cell_vectors(vectors: Any, result_ad: ad.AnnData) -> tuple[pd.DataFrame, pd.DataFrame]:
     if isinstance(vectors, pd.Series):
         frame = vectors.to_frame(name=vectors.name or "extension_1")
     elif isinstance(vectors, pd.DataFrame):
@@ -134,13 +251,74 @@ def _coerce_cell_vectors(vectors: Any, result_ad: ad.AnnData) -> pd.DataFrame:
             )
         else:
             raise TypeError("cell_vector must be a Series, DataFrame, or 1D/2D array.")
-    missing = result_ad.obs_names.difference(frame.index)
+
+    frame.index = frame.index.astype(str)
+    target_labels = _result_alignment_labels(result_ad)
+    missing = target_labels.difference(frame.index)
     if len(missing):
-        raise ValueError("cell_vector must contain all result.result_ad.obs_names.")
-    numeric = frame.reindex(result_ad.obs_names).apply(pd.to_numeric, errors="coerce")
-    if numeric.isna().any().any():
-        raise ValueError("cell_vector must be numeric after alignment.")
-    return numeric.astype(np.float32)
+        raise ValueError("cell_vector must cover all result-space cells after original-cell alignment.")
+    aligned = frame.reindex(target_labels)
+    aligned.index = result_ad.obs_names.astype(str)
+
+    value_blocks: list[pd.DataFrame] = []
+    meta_rows: list[dict[str, Any]] = []
+    for column in aligned.columns:
+        series = aligned[column]
+        if pd.api.types.is_bool_dtype(series):
+            name = str(column)
+            value_blocks.append(pd.DataFrame({name: series.astype(np.int8)}, index=aligned.index))
+            meta_rows.append(
+                {
+                    "feature": name,
+                    "function_label": name,
+                    "function_class": "cell_vector",
+                    "parent": str(column),
+                    "value_dtype": "bool",
+                }
+            )
+        elif pd.api.types.is_numeric_dtype(series):
+            name = str(column)
+            value_blocks.append(pd.DataFrame({name: pd.to_numeric(series)}, index=aligned.index))
+            meta_rows.append(
+                {
+                    "feature": name,
+                    "function_label": name,
+                    "function_class": "cell_vector",
+                    "parent": str(column),
+                    "value_dtype": "numeric",
+                }
+            )
+        else:
+            dummies = pd.get_dummies(series.astype(str), prefix=str(column)).astype(np.int8)
+            value_blocks.append(dummies)
+            for dummy_name in dummies.columns:
+                meta_rows.append(
+                    {
+                        "feature": str(dummy_name),
+                        "function_label": str(dummy_name),
+                        "function_class": "cell_vector",
+                        "parent": str(column),
+                        "value_dtype": "categorical",
+                    }
+                )
+
+    if not value_blocks:
+        raise ValueError("cell_vector did not produce any usable feature columns.")
+
+    values = pd.concat(value_blocks, axis=1).astype(np.float32)
+    metadata = pd.DataFrame(meta_rows).set_index("feature")
+    return values, metadata
+
+
+def _coerce_gene_set(gene_set: Any) -> dict[str, list[str]]:
+    if isinstance(gene_set, Mapping):
+        return {
+            str(key): [str(gene) for gene in value]
+            for key, value in gene_set.items()
+        }
+    if isinstance(gene_set, (list, tuple, set, pd.Index, pd.Series)):
+        return {"gene_set_1": [str(gene) for gene in list(gene_set)]}
+    raise TypeError("gene_set must be a mapping or a one-dimensional gene collection.")
 
 
 def _summarize_vectors(
@@ -330,11 +508,18 @@ def evaluate_extension(
 
     gene_loadings = None
     if gene_set is not None:
-        potential_genes = {str(gene) for genes in gene_set.values() for gene in genes}
-        exp = _align_expression_to_result(adata, result_ad, layer=layer, genes=potential_genes)
+        normalized_gene_set = _coerce_gene_set(gene_set)
+        potential_genes = {str(gene) for genes in normalized_gene_set.values() for gene in genes}
+        expression_frame = _build_extension_expression(
+            adata,
+            result_ad,
+            affinity=affinity,
+            layer=layer,
+            genes=potential_genes,
+        )
         vectors, feature_metadata, gene_loadings = _gene_set_to_cell_vectors(
-            exp,
-            gene_set,
+            expression_frame,
+            normalized_gene_set,
             min_genes_count=set_min_genes_count,
             loading_threshold=set_loading_threshold,
             embedding_threshold=set_embedding_threshold,
@@ -342,32 +527,30 @@ def evaluate_extension(
         feature_class = "gene_set"
     elif gene_vector is not None:
         potential_genes = set(map(str, gene_vector.index))
-        exp = _align_expression_to_result(adata, result_ad, layer=layer, genes=potential_genes)
+        expression_frame = _build_extension_expression(
+            adata,
+            result_ad,
+            affinity=affinity,
+            layer=layer,
+            genes=potential_genes,
+        )
         vectors, feature_metadata = _gene_vector_to_cell_vectors(
-            exp,
+            expression_frame,
             gene_vector,
             min_genes_count=vector_min_genes_count,
         )
         feature_class = "gene_vector"
     else:
-        vectors = _coerce_cell_vectors(cell_vector, result_ad)
-        feature_metadata = pd.DataFrame(
-            {
-                "function_label": vectors.columns.astype(str),
-                "function_class": "cell_vector",
-                "parent": vectors.columns.astype(str),
-            },
-            index=vectors.columns,
-        )
+        vectors, feature_metadata = _coerce_cell_vectors(cell_vector, result_ad)
         feature_class = "cell_vector"
 
-    var = _summarize_vectors(vectors, label=label, affinity=affinity)
-    var["gene_important"] = (var["response_score"] > 0).astype(np.int8)
-    var = pd.concat([var, feature_metadata.reindex(var.index)], axis=1)
+    summary_var = _summarize_vectors(vectors, label=label, affinity=affinity)
+    summary_var["gene_important"] = (summary_var["response_score"] > 0).astype(np.int8)
+    summary_var = pd.concat([summary_var, feature_metadata.reindex(summary_var.index)], axis=1)
     extension_ad = ad.AnnData(
         X=vectors.to_numpy(dtype=np.float32),
         obs=result_ad.obs.copy(),
-        var=var,
+        var=summary_var,
     )
     extension_ad.obsp[affinity_key] = sparse.csr_matrix(affinity.astype(np.float32, copy=False))
     extension_ad.uns["crane_info"] = {
@@ -378,6 +561,8 @@ def evaluate_extension(
         "label_key": resolved_label_key,
         "affinity_key": affinity_key,
         "expression_layer": layer or "X",
+        "core_expression_source": "result.result_ad.X",
+        "supplement_missing_genes_from_adata": bool(adata is not None and feature_class in {"gene_set", "gene_vector"}),
         "run": dict(metadata or {}),
     }
     if gene_loadings is not None:

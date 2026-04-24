@@ -1,10 +1,9 @@
-"""Result object for the new CRANE package."""
+"""Result object and downstream analysis helpers for CRANE."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from contextlib import redirect_stdout
-from io import StringIO
+import hashlib
 from pathlib import Path
 from typing import Any
 import pickle
@@ -13,11 +12,10 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from scipy.sparse.csgraph import connected_components
 from scipy.spatial.distance import pdist, squareform
 
 from ..internal.logger import build_logger
-from ..core.step1 import _compute_sp_moran_between, _compute_sp_moran_between_col
+from ..step1.step1 import _compute_sp_moran_between
 from ..step2.kernels import (
     adaptive_knn,
     compute_distance_cosine,
@@ -31,7 +29,7 @@ from .schema import FunctionalInput, LoggerConfig
 from ._gene_module_backends import resolve_gene_module_method, run_gene_module_backend
 
 
-def _select_representative_samples(score_matrix: pd.DataFrame, n: int = 3) -> list[int]:
+def _select_representative_sample_indices(score_matrix: pd.DataFrame, n: int = 3) -> list[int]:
     if score_matrix.shape[1] <= n:
         return list(range(score_matrix.shape[1]))
     dist_matrix = squareform(pdist(score_matrix.T, metric="euclidean"))
@@ -184,76 +182,76 @@ def _merge_selected_samples_exact(
     aggregated_first: bool = False,
     groupby_sort: bool = True,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-    coca_cell_meta = stacked_obs.rename(
+    merged_meta = stacked_obs.rename(
         columns={
             "original_cell_id": "cell_id",
             "group_label": "group_id",
             "label_mixed": "label_last",
         }
     ).copy()
-    coca_cell_meta["label_smooth"] = coca_cell_meta["label_last"].astype(np.float32)
-    coca_cell_meta["label_mixed"] = coca_cell_meta["label_last"].astype(np.float32)
+    merged_meta["label_smooth"] = merged_meta["label_last"].astype(np.float32)
+    merged_meta["label_mixed"] = merged_meta["label_last"].astype(np.float32)
 
-    coca_sort_order = coca_cell_meta["group_id"].map({"control": 0, "case": 1}).argsort()
-    coca_cell_meta = coca_cell_meta.iloc[coca_sort_order].copy()
-    coca_raw_exp = stacked_raw[coca_sort_order, :].astype(np.float32, copy=False)
-    coca_smooth_exp = stacked_smooth[coca_sort_order, :].astype(np.float32, copy=False)
+    sort_order = merged_meta["group_id"].map({"control": 0, "case": 1}).argsort()
+    merged_meta = merged_meta.iloc[sort_order].copy()
+    raw_expr = stacked_raw[sort_order, :].astype(np.float32, copy=False)
+    smooth_expr = stacked_smooth[sort_order, :].astype(np.float32, copy=False)
 
-    coca_control_group = coca_cell_meta[coca_cell_meta["group_id"] == "control"].copy()
-    coca_control_group.index = coca_control_group.loc[:, "cell_id"]
-    coca_case_group = coca_cell_meta[coca_cell_meta["group_id"] == "case"].copy()
-    coca_case_group.index = coca_case_group.loc[:, "cell_id"]
+    control_group = merged_meta[merged_meta["group_id"] == "control"].copy()
+    control_group.index = control_group.loc[:, "cell_id"]
+    case_group = merged_meta[merged_meta["group_id"] == "case"].copy()
+    case_group.index = case_group.loc[:, "cell_id"]
 
-    coca_control_group, coca_raw_exp_control, coca_smooth_exp_control = _deduplicate_group_exact(
-        coca_control_group,
-        coca_raw_exp[coca_cell_meta["group_id"] == "control"],
-        coca_smooth_exp[coca_cell_meta["group_id"] == "control"],
+    control_group, raw_expr_control, smooth_expr_control = _deduplicate_group_exact(
+        control_group,
+        raw_expr[merged_meta["group_id"] == "control"],
+        smooth_expr[merged_meta["group_id"] == "control"],
         aggregated_first=aggregated_first,
         groupby_sort=groupby_sort,
     )
-    coca_case_group, coca_raw_exp_case, coca_smooth_exp_case = _deduplicate_group_exact(
-        coca_case_group,
-        coca_raw_exp[coca_cell_meta["group_id"] == "case"],
-        coca_smooth_exp[coca_cell_meta["group_id"] == "case"],
+    case_group, raw_expr_case, smooth_expr_case = _deduplicate_group_exact(
+        case_group,
+        raw_expr[merged_meta["group_id"] == "case"],
+        smooth_expr[merged_meta["group_id"] == "case"],
         aggregated_first=aggregated_first,
         groupby_sort=groupby_sort,
     )
 
     rng = np.random.RandomState(random_state)
-    if len(coca_control_group) > len(coca_case_group):
-        coca_control_sample_indices = rng.choice(
-            coca_control_group.index.to_numpy(),
-            size=len(coca_case_group),
+    if len(control_group) > len(case_group):
+        selected_control_ids = rng.choice(
+            control_group.index.to_numpy(),
+            size=len(case_group),
             replace=False,
         )
-        coca_control_group = coca_control_group.loc[coca_control_sample_indices]
-        coca_raw_exp_control = coca_raw_exp_control[coca_control_group.index.get_indexer(coca_control_group.index)]
-        coca_smooth_exp_control = coca_smooth_exp_control[
-            coca_control_group.index.get_indexer(coca_control_group.index)
+        control_group = control_group.loc[selected_control_ids]
+        raw_expr_control = raw_expr_control[control_group.index.get_indexer(control_group.index)]
+        smooth_expr_control = smooth_expr_control[
+            control_group.index.get_indexer(control_group.index)
         ]
-    elif len(coca_control_group) < len(coca_case_group):
-        coca_case_sample_indices = rng.choice(
-            coca_case_group.index.to_numpy(),
-            size=len(coca_control_group),
+    elif len(control_group) < len(case_group):
+        selected_case_ids = rng.choice(
+            case_group.index.to_numpy(),
+            size=len(control_group),
             replace=False,
         )
-        coca_case_group = coca_case_group.loc[coca_case_sample_indices]
-        coca_raw_exp_case = coca_raw_exp_case[coca_case_group.index.get_indexer(coca_case_group.index)]
-        coca_smooth_exp_case = coca_smooth_exp_case[coca_case_group.index.get_indexer(coca_case_group.index)]
+        case_group = case_group.loc[selected_case_ids]
+        raw_expr_case = raw_expr_case[case_group.index.get_indexer(case_group.index)]
+        smooth_expr_case = smooth_expr_case[case_group.index.get_indexer(case_group.index)]
 
-    coca_cell_meta = pd.concat([coca_control_group, coca_case_group], ignore_index=True)
-    coca_raw_exp = np.vstack([coca_raw_exp_control, coca_raw_exp_case]).astype(np.float32, copy=False)
-    coca_smooth_exp = np.vstack([coca_smooth_exp_control, coca_smooth_exp_case]).astype(np.float32, copy=False)
-    coca_cell_meta.set_index("cell_id", inplace=True)
+    merged_meta = pd.concat([control_group, case_group], ignore_index=True)
+    raw_expr = np.vstack([raw_expr_control, raw_expr_case]).astype(np.float32, copy=False)
+    smooth_expr = np.vstack([smooth_expr_control, smooth_expr_case]).astype(np.float32, copy=False)
+    merged_meta.set_index("cell_id", inplace=True)
 
-    merged_obs = coca_cell_meta.rename(
+    merged_obs = merged_meta.rename(
         columns={
             "group_id": "group_label",
             "label_mixed": "label_mixed",
         }
     ).copy()
     merged_obs["original_cell_id"] = merged_obs.index.astype(str)
-    return merged_obs, coca_raw_exp, coca_smooth_exp
+    return merged_obs, raw_expr, smooth_expr
 
 
 def _balance_groups(
@@ -283,7 +281,7 @@ def _balance_groups(
     if len(control_group) > len(case_group):
         selected_ids = rng.choice(control_group.index.to_numpy(), size=len(case_group), replace=False)
         control_group = control_group.loc[selected_ids].copy()
-        # Match the legacy output-handler semantics, including its matrix reindex path.
+        # Preserve the current output-handler semantics, including its matrix reindex path.
         raw_control = raw_control[control_group.index.get_indexer(control_group.index)]
         smooth_control = smooth_control[control_group.index.get_indexer(control_group.index)]
     elif len(control_group) < len(case_group):
@@ -314,60 +312,6 @@ def _build_reconstructed_result_space(
     binary_delta_threshold: float = 0.1,
     compute_gene_pair: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, sparse.csr_matrix, np.ndarray]:
-    if compute_gene_pair:
-        try:
-            from couture.steps.f2_convertor import FishConvertor
-
-            fs_values = (
-                response_identity.reindex(gene_names).astype(np.int8)
-                if response_identity is not None
-                else pd.Series(np.ones(len(gene_names), dtype=np.int8), index=gene_names)
-            )
-            fs_df = pd.DataFrame({"fs_input": fs_values}, index=gene_names)
-            control_ids = merged_obs.loc[merged_obs["group_label"] == "control"].index.astype(str).to_numpy()
-            case_ids = merged_obs.loc[merged_obs["group_label"] == "case"].index.astype(str).to_numpy()
-            coca = FishConvertor(
-                iter_round=20,
-                control_cindex=control_ids,
-                case_cindex=case_ids,
-                fs_index=fs_df,
-                exp_raw=np.asarray(merged_raw, dtype=np.float32),
-                exp_last=np.asarray(merged_smooth, dtype=np.float32),
-                label_last=merged_obs["label_mixed"],
-                alpha_signal=0.15,
-                guide_fs=None,
-                silence_print=True,
-            )
-            coca._construct_cell_dc(fs_select="fs_input", dc_method="pca")
-            coca._construct_cell_graph(
-                fs_select="fs_input",
-                distance_metric="cosine",
-                knn_method="aknn",
-                n_neighbors=10,
-                symmetric_bool=True,
-                force_connect_bool=True,
-                connect_method="mst",
-                affinity_method="scanpy_gaussian",
-            )
-            coca._process_signal_by_cell_affinity(
-                fs_select="fs_input",
-                smooth_method="heat_kernel",
-                smooth_strength=0.1,
-                top_k=-1,
-                update_fs=False,
-            )
-            coca._continuize_label(alpha=0.1)
-            coca._link_gene_pair(cor_method="moran")
-            return (
-                np.asarray(coca.ad.layers["exp_mixed_by_cell_graph"], dtype=np.float32),
-                np.asarray(coca.ad.obs["label_mixed"], dtype=np.float32),
-                np.asarray(coca.ad.varp["cor"], dtype=np.float32),
-                np.asarray(coca.ad.var["gene_self_cor"], dtype=np.float32),
-                sparse.csr_matrix(np.asarray(coca.ad.obsp["affinity"], dtype=np.float32)),
-                np.asarray(coca.ad.var["gene_label_cor"], dtype=np.float32),
-            )
-        except Exception:
-            pass
     fs_mask = (
         response_identity.reindex(gene_names).to_numpy(dtype=np.int8) == 1
         if response_identity is not None
@@ -449,146 +393,6 @@ def _build_reconstructed_result_space(
     return exp_mixed, label_mixed, gene_cor, gene_self_cor, affinity, gene_label_cor
 
 
-def _build_result_space_via_exact_merge(
-    *,
-    gene_names: pd.Index,
-    gene_scores: pd.Series | None,
-    response_identity: pd.Series | None,
-    sample_outputs: tuple[Any, ...],
-    sample_packs: tuple[Any, ...],
-    selected_indices: list[int],
-    random_state: int = 123,
-) -> ad.AnnData | None:
-    try:
-        from couture.steps.c6_output_handler import merge_crane
-    except Exception:
-        return None
-
-    class _SampleObj:
-        def __init__(self, adata_obj: ad.AnnData) -> None:
-            self.ad = adata_obj
-
-        def copy(self) -> "_SampleObj":
-            return _SampleObj(self.ad.copy())
-
-    class _FishObj:
-        def __init__(self, results_coca: list[_SampleObj], fs_update: pd.DataFrame, mean_delta: pd.Series) -> None:
-            self.results_coca = results_coca
-            self.fs_update = fs_update
-            self.mean_delta = mean_delta
-            self.results_coco = results_coca
-
-    class _CIter:
-        def __init__(self, representative_samples: list[int], fish_obj: _FishObj) -> None:
-            self.representative_samples = tuple(representative_samples)
-            self.fish_obj = fish_obj
-
-    class _CraneObj:
-        pass
-
-    raw_lookup: dict[str, np.ndarray] = {}
-    sample_objects: list[_SampleObj] = []
-    for sample_idx in selected_indices:
-        pack = sample_packs[sample_idx]
-        output = sample_outputs[sample_idx]
-        ordered_cells = list(pack.control_cells) + list(pack.case_cells)
-        obs = pd.DataFrame(index=pd.Index(ordered_cells))
-        obs["cell_id"] = ordered_cells
-        obs["group_id"] = ["control"] * len(pack.control_cells) + ["case"] * len(pack.case_cells)
-        obs["label_raw"] = np.asarray(pack.label_raw, dtype=np.float32)
-        obs["label_last"] = np.asarray(output.label_last_next, dtype=np.float32)
-        obs["label_smooth"] = np.asarray(output.label_last_next, dtype=np.float32)
-        obs["label_mixed"] = np.asarray(output.label_last_next, dtype=np.float32)
-        exp_raw = np.asarray(pack.exp_raw, dtype=np.float32)
-        for cell_id, row in zip(ordered_cells, exp_raw, strict=False):
-            raw_lookup[str(cell_id)] = row
-        sample_ad = ad.AnnData(
-            X=np.asarray(output.exp_last_next, dtype=np.float32),
-            obs=obs.copy(),
-            var=pd.DataFrame(index=gene_names.copy()),
-        )
-        sample_ad.uns["crane_info"] = {
-            "expression_matrix": "X",
-            "expression_semantics": "exp_mixed_by_cell_graph",
-        }
-        sample_ad.layers["exp_mixed_by_gene_graph"] = np.asarray(sample_ad.X, dtype=np.float32)
-        sample_objects.append(_SampleObj(sample_ad))
-
-    if not sample_objects:
-        return None
-
-    fs_update = pd.DataFrame(
-        {
-            "New_fs": (
-                response_identity.reindex(gene_names).astype(np.int8)
-                if response_identity is not None
-                else np.ones(len(gene_names), dtype=np.int8)
-            )
-        },
-        index=gene_names.copy(),
-    )
-    mean_delta = (
-        gene_scores.reindex(gene_names).astype(np.float32)
-        if gene_scores is not None
-        else pd.Series(np.zeros(len(gene_names), dtype=np.float32), index=gene_names.copy())
-    )
-
-    all_cells = list(raw_lookup.keys())
-    raw_mat = np.vstack([raw_lookup[cell_id] for cell_id in all_cells]).astype(np.float32, copy=False)
-    adata_strong = ad.AnnData(
-        raw_mat.copy(),
-        obs=pd.DataFrame(index=all_cells),
-        var=pd.DataFrame(index=gene_names.copy()),
-    )
-    adata_strong.layers["central_norm"] = raw_mat.copy()
-
-    crane_obj = _CraneObj()
-    crane_obj.C_iter = _CIter(
-        representative_samples=list(range(len(selected_indices))),
-        fish_obj=_FishObj(sample_objects, fs_update=fs_update, mean_delta=mean_delta),
-    )
-    crane_obj.input = {
-        "adata_strong": adata_strong,
-        "function_gene_set": None,
-        "function_gene_vector": None,
-        "function_cell_vector": None,
-        "thres_k": 2,
-    }
-
-    rng_state = np.random.get_state()
-    np.random.seed(random_state)
-    try:
-        with redirect_stdout(StringIO()):
-            coca, _ = merge_crane(
-                crane_obj,
-                deduplicate_bool=True,
-                balanced_bool=True,
-                module_method="leiden",
-                eva_alpha=0.5,
-                feature_mode="self_n_label",
-                adj_bc_w=0,
-                function_gene_set=None,
-                function_gene_vector=None,
-                function_cell_vector=None,
-            )
-    finally:
-        np.random.set_state(rng_state)
-
-    result_ad = coca.ad.copy()
-    result_ad.obs = result_ad.obs.rename(columns={"group_id": "group_label"}).copy()
-    result_ad.obs["original_cell_id"] = result_ad.obs_names.astype(str)
-    result_ad.obs["selected_sample_count"] = 1
-    result_ad.obs["selected_sample_ids"] = [tuple(
-        sample_outputs[idx].metadata.get("sample_id") or sample_packs[idx].sample_id or f"sample_{idx}"
-        for idx in selected_indices
-    )] * result_ad.n_obs
-    if gene_scores is not None:
-        result_ad.var["response_score"] = gene_scores.reindex(gene_names).astype(np.float32)
-    if response_identity is not None:
-        result_ad.var["response_identity"] = response_identity.reindex(gene_names).astype(np.int8)
-    return result_ad
-
-
 def _calculate_deviation_guarded(values: pd.Series | np.ndarray, floor: float = 0.05) -> float:
     data = np.asarray(values, dtype=np.float32).reshape(-1)
     if data.size == 0:
@@ -642,7 +446,7 @@ def _compute_history_merged_response_score(
 
     meta.update(
         {
-            "source": "legacy_history_merge",
+            "source": "history_merge",
             "history_merge_applied": True,
             "history_rounds": int(usable_rounds),
             "history_merge_reason": None,
@@ -732,173 +536,135 @@ def _resolve_result_space_identity(
     sample_packs: tuple[Any, ...] = (),
     selected_indices: list[int] | None = None,
 ) -> tuple[pd.Series | None, dict[str, Any] | None, dict[int, dict[str, np.ndarray]] | None]:
+    def _normalize_graph_fs_mode(value: str) -> str:
+        return str(value).strip().lower()
+
     if response_identity is None:
         return None, None, None
 
+    graph_fs_mode = _normalize_graph_fs_mode(graph_fs_mode)
     base_ri = response_identity.reindex(gene_names).astype(np.int8)
-    if graph_fs_mode not in {"handoff", "legacy_history_rescue"} or step2_result is None:
+    if graph_fs_mode not in {"handoff", "history_rescue"} or step2_result is None:
         return base_ri, None, None
 
     result_space_identity = getattr(step2_result, "result_space_identity", None)
-    handoff_meta = None
+    result_space_meta = None
     if hasattr(step2_result, "metadata"):
-        handoff_meta = step2_result.metadata.get("result_space_handoff")
+        result_space_meta = step2_result.metadata.get("result_space_handoff")
     if result_space_identity is None:
         return base_ri, {"mode": graph_fs_mode, "fallback": "missing_handoff"}, None
 
-    if (
-        graph_fs_mode == "handoff"
-        and sample_outputs
-        and sample_packs
-        and selected_indices
-        and getattr(step2_result, "state", None) is not None
-    ):
-        try:
-            from couture.implementations.feature.feature_divide import deg_classification
-            from couture.steps.f2_convertor import FishConvertor
-
-            state = step2_result.state
-            current_guides = list(getattr(state, "guide_pass_list", ()))
-            if len(current_guides) == len(sample_packs):
-                guide_mask = getattr(sample_packs[0], "guide_fs_mask", None)
-                if guide_mask is not None:
-                    guide_fs_df = pd.DataFrame(
-                        {"fs_guide": pd.Series(np.asarray(guide_mask, dtype=np.int8), index=gene_names.copy())},
-                        index=gene_names.copy(),
-                    )
-
-                    def _run_exact_sample(sample_idx: int, *, input_guide: bool) -> dict[str, Any]:
-                        pack = sample_packs[sample_idx]
-                        exp_last = np.asarray(state.exp_last_list[sample_idx], dtype=np.float32)
-                        label_last = np.asarray(state.label_last_list[sample_idx], dtype=np.float32)
-                        fs_df = pd.DataFrame({"fs_input": base_ri.copy()}, index=gene_names.copy())
-                        coca = FishConvertor(
-                            iter_round=int(getattr(state, "iteration", 20) or 20),
-                            control_cindex=list(pack.control_cells),
-                            case_cindex=list(pack.case_cells),
-                            fs_index=fs_df,
-                            exp_raw=np.asarray(pack.exp_raw, dtype=np.float32),
-                            exp_last=exp_last,
-                            label_last=label_last,
-                            alpha_signal=0.15,
-                            guide_fs=guide_fs_df,
-                            silence_print=True,
-                        )
-                        coca._construct_cell_dc(fs_select="fs_input", dc_method="pca")
-                        coca._construct_cell_graph(
-                            fs_select="fs_input",
-                            distance_metric="cosine",
-                            knn_method="aknn",
-                            n_neighbors=10,
-                            symmetric_bool=True,
-                            force_connect_bool=True,
-                            connect_method="mst",
-                            affinity_method="scanpy_gaussian",
-                        )
-                        if not input_guide:
-                            coca._construct_cell_dc(fs_select="fs_guide", dc_method="pca")
-                            coca._construct_cell_graph(
-                                fs_select="fs_guide",
-                                distance_metric="cosine",
-                                knn_method="aknn",
-                                n_neighbors=10,
-                                symmetric_bool=True,
-                                force_connect_bool=True,
-                                connect_method="mst",
-                                affinity_method="scanpy_gaussian",
-                            )
-                            coca._process_signal_by_cell_affinity(
-                                fs_select="fs_guide",
-                                smooth_method="heat_kernel",
-                                smooth_strength=0.1,
-                                top_k=-1,
-                            )
-                        else:
-                            coca._process_signal_by_cell_affinity(
-                                fs_select="fs_input",
-                                smooth_method="heat_kernel",
-                                smooth_strength=0.1,
-                                top_k=-1,
-                            )
-                        coca._continuize_label(fs_select="fs_input", alpha=0.1, strict_label=True)
-                        if not input_guide:
-                            coca._continuize_label(fs_select="fs_guide", alpha=0.1, strict_label=True)
-                            coca._compare_cell_graph()
-                        coca._link_gene_pair(cor_method="moran")
-
-                        gene_self = coca.ad.var["gene_self_cor"].astype(np.float32)
-                        gene_label = coca.ad.var["gene_label_cor"].astype(np.float32)
-                        combined = (np.sqrt((gene_self**2) + (gene_label**2)) / np.sqrt(2)).astype(np.float32)
-                        background = combined.loc[coca.ad.var["fs_input"] == 0]
-                        background_center = float(np.median(background.to_numpy(dtype=np.float32))) if len(background) else 0.0
-                        norm_score = (combined - background_center).astype(np.float32).reindex(gene_names.copy())
-                        return {
-                            "norm_score": norm_score,
-                            "bool_compare": bool(coca.ad.uns.get("bool_compare", True)),
-                            "exp_mixed": np.asarray(coca.ad.layers["exp_mixed_by_cell_graph"], dtype=np.float32),
-                            "label_mixed": coca.ad.obs["label_mixed"].to_numpy(dtype=np.float32),
-                        }
-
-                    exact_cache: dict[tuple[int, bool], dict[str, Any]] = {}
-                    rescue_false_indices: list[int] = []
-                    for sample_idx in selected_indices:
-                        if sample_idx >= len(current_guides) or not bool(current_guides[sample_idx]):
-                            continue
-                        probe = _run_exact_sample(sample_idx, input_guide=False)
-                        exact_cache[(sample_idx, False)] = probe
-                        if not probe["bool_compare"]:
-                            rescue_false_indices.append(int(sample_idx))
-
-                    exact_scores: list[np.ndarray] = []
-                    sample_overrides: dict[int, dict[str, np.ndarray]] = {}
-                    for sample_idx in range(len(sample_packs)):
-                        use_false_guide = sample_idx in rescue_false_indices
-                        cache_key = (sample_idx, False if use_false_guide else True)
-                        exact = exact_cache.get(cache_key)
-                        if exact is None:
-                            exact = _run_exact_sample(sample_idx, input_guide=not use_false_guide)
-                            exact_cache[cache_key] = exact
-                        exact_scores.append(exact["norm_score"].to_numpy(dtype=np.float32))
-                        if sample_idx in selected_indices:
-                            sample_overrides[int(sample_idx)] = {
-                                "exp_last_next": exact["exp_mixed"],
-                                "label_last_next": exact["label_mixed"],
-                            }
-
-                    mean_delta = pd.Series(
-                        np.mean(np.vstack(exact_scores), axis=0, dtype=np.float32),
-                        index=gene_names.copy(),
-                    )
-                    refer = mean_delta.loc[base_ri == 0]
-                    if len(refer):
-                        exact_fs = deg_classification(refer=refer, series=mean_delta, mad_k=2.0)["New_fs"]
-                        exact_fs = (exact_fs.reindex(gene_names.copy()).fillna(0).astype(np.int8) & base_ri).astype(np.int8)
-                        return (
-                            exact_fs,
-                            {
-                                "mode": graph_fs_mode,
-                                "resolver": "exact_sample_handoff",
-                                "active_genes": int(exact_fs.sum()),
-                                "rescue_false_sample_indices": tuple(int(v) for v in rescue_false_indices),
-                                "handoff_meta": handoff_meta,
-                                "fallback": None,
-                            },
-                            sample_overrides,
-                        )
-        except Exception:
-            pass
-
-    handoff_series = pd.Series(
+    result_space_series = pd.Series(
         np.asarray(result_space_identity, dtype=np.int8),
         index=gene_names,
         name="result_space_identity",
     )
-    return handoff_series, {
+    return result_space_series, {
         "mode": graph_fs_mode,
-        "active_genes": int(handoff_series.sum()),
+        "active_genes": int(result_space_series.sum()),
         "fallback": None,
-        "handoff_meta": handoff_meta,
+        "handoff_meta": result_space_meta,
     }, None
+
+
+def _sample_output_id(pack: Any, output: Any, sample_idx: int) -> str:
+    return str(output.metadata.get("sample_id") or pack.sample_id or f"sample_{sample_idx}")
+
+
+def _resolve_selected_sample_indices(
+    *,
+    sample_outputs: tuple[Any, ...],
+    sample_packs: tuple[Any, ...],
+    step2_result: Any | None,
+    result_ad: ad.AnnData | None = None,
+    merge_top_n: int = 3,
+    merge_mode: str = "step2_representative",
+) -> list[int]:
+    if result_ad is not None and hasattr(result_ad, "uns"):
+        crane_info = result_ad.uns.get("crane_info", {})
+        stored_sample_ids = tuple(crane_info.get("representative_sample_ids") or ())
+        if stored_sample_ids:
+            sample_id_to_idx = {
+                _sample_output_id(pack, output, idx): int(idx)
+                for idx, (pack, output) in enumerate(zip(sample_packs, sample_outputs, strict=False))
+            }
+            selected = [sample_id_to_idx[sample_id] for sample_id in stored_sample_ids if sample_id in sample_id_to_idx]
+            if len(selected) == len(stored_sample_ids):
+                return selected
+
+    merge_mode = str(merge_mode).strip().lower()
+    if merge_mode == "all":
+        return list(range(len(sample_outputs)))
+    if merge_mode == "step2_representative":
+        selected = [
+            int(idx)
+            for idx in getattr(step2_result, "representative_sample_indices", ())[: min(int(merge_top_n), len(sample_outputs))]
+        ]
+        if selected:
+            return selected
+        return list(range(min(int(merge_top_n), len(sample_outputs))))
+
+    score_frame = pd.DataFrame(
+        {
+            _sample_output_id(pack, output, idx): np.asarray(output.norm_combined_score, dtype=np.float32)
+            for idx, (pack, output) in enumerate(zip(sample_packs, sample_outputs, strict=False))
+        },
+        index=pd.RangeIndex(len(np.asarray(sample_outputs[0].norm_combined_score, dtype=np.float32))),
+    )
+    return _select_representative_sample_indices(score_frame, n=int(merge_top_n))
+
+
+def _stack_selected_result_space_inputs(
+    *,
+    sample_outputs: tuple[Any, ...],
+    sample_packs: tuple[Any, ...],
+    selected_indices: list[int],
+    sample_overrides: dict[int, dict[str, np.ndarray]] | None = None,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    raw_blocks: list[np.ndarray] = []
+    smooth_blocks: list[np.ndarray] = []
+    obs_frames: list[pd.DataFrame] = []
+
+    for sample_idx in selected_indices:
+        pack = sample_packs[sample_idx]
+        output = sample_outputs[sample_idx]
+        sample_override = sample_overrides.get(sample_idx) if sample_overrides else None
+        raw_blocks.append(np.asarray(pack.exp_raw, dtype=np.float32))
+        smooth_blocks.append(
+            np.asarray(
+                sample_override["exp_last_next"] if sample_override is not None else output.exp_last_next,
+                dtype=np.float32,
+            )
+        )
+        label_raw = np.asarray(pack.label_raw, dtype=np.float32).reshape(-1)
+        label_mixed = np.asarray(
+            sample_override["label_last_next"] if sample_override is not None else output.label_last_next,
+            dtype=np.float32,
+        ).reshape(-1)
+        control_cells = list(pack.control_cells)
+        case_cells = list(pack.case_cells)
+        ordered_cells = control_cells + case_cells
+        group_labels = ["control"] * len(control_cells) + ["case"] * len(case_cells)
+        sample_id = _sample_output_id(pack, output, sample_idx)
+        obs_frames.append(
+            pd.DataFrame(
+                {
+                    "sample_id": sample_id,
+                    "original_cell_id": ordered_cells,
+                    "group_label": group_labels,
+                    "label_raw": label_raw,
+                    "label_mixed": label_mixed,
+                    "sample_cell_index": np.arange(len(ordered_cells), dtype=np.int32),
+                },
+                index=[f"{sample_id}:{cell_id}" for cell_id in ordered_cells],
+            )
+        )
+
+    return (
+        pd.concat(obs_frames, axis=0),
+        np.vstack(raw_blocks).astype(np.float32, copy=False),
+        np.vstack(smooth_blocks).astype(np.float32, copy=False),
+    )
 
 
 def build_result_anndata(
@@ -918,6 +684,9 @@ def build_result_anndata(
     graph_fs_mode: str = "default",
 ) -> ad.AnnData | None:
     """Build a compact post-Step2 result-space AnnData for downstream work."""
+
+    def _normalize_merge_mode(value: str) -> str:
+        return str(value).strip().lower()
 
     metadata = metadata or {}
     if not sample_outputs or not sample_packs:
@@ -942,9 +711,10 @@ def build_result_anndata(
         },
         index=gene_names.copy(),
     )
+    merge_mode = _normalize_merge_mode(merge_mode)
     if merge_mode == "all":
         selected_indices = list(range(len(sample_outputs)))
-    elif merge_mode == "legacy_representative":
+    elif merge_mode == "step2_representative":
         selected_indices = [
             int(idx)
             for idx in getattr(step2_result, "representative_sample_indices", ())[: min(int(merge_top_n), len(sample_outputs))]
@@ -964,88 +734,12 @@ def build_result_anndata(
         selected_indices=selected_indices,
     )
 
-    raw_blocks: list[np.ndarray] = []
-    smooth_blocks: list[np.ndarray] = []
-    obs_frames: list[pd.DataFrame] = []
-
-    merge_indices = list(selected_indices)
-
-    for sample_idx in merge_indices:
-        pack = sample_packs[sample_idx]
-        output = sample_outputs[sample_idx]
-        raw_blocks.append(np.asarray(pack.exp_raw, dtype=np.float32))
-        sample_override = sample_overrides.get(sample_idx) if sample_overrides else None
-        smooth_blocks.append(
-            np.asarray(
-                sample_override["exp_last_next"] if sample_override is not None else output.exp_last_next,
-                dtype=np.float32,
-            )
-        )
-        label_raw = np.asarray(pack.label_raw, dtype=np.float32).reshape(-1)
-        label_mixed = np.asarray(
-            sample_override["label_last_next"] if sample_override is not None else output.label_last_next,
-            dtype=np.float32,
-        ).reshape(-1)
-
-        control_cells = list(pack.control_cells)
-        case_cells = list(pack.case_cells)
-        ordered_cells = control_cells + case_cells
-        group_labels = ["control"] * len(control_cells) + ["case"] * len(case_cells)
-        sample_id = output.metadata.get("sample_id") or pack.sample_id or f"sample_{sample_idx}"
-        obs_frames.append(
-            pd.DataFrame(
-                {
-                    "sample_id": sample_id,
-                    "original_cell_id": ordered_cells,
-                    "group_label": group_labels,
-                    "label_raw": label_raw,
-                    "label_mixed": label_mixed,
-                    "sample_cell_index": np.arange(len(ordered_cells), dtype=np.int32),
-                },
-                index=[f"{sample_id}:{cell_id}" for cell_id in ordered_cells],
-            )
-        )
-
-    stacked_raw = np.vstack(raw_blocks).astype(np.float32, copy=False)
-    stacked_smooth = np.vstack(smooth_blocks).astype(np.float32, copy=False)
-    stacked_obs = pd.concat(obs_frames, axis=0)
-    exact_result_ad = (
-        _build_result_space_via_exact_merge(
-            gene_names=gene_names,
-            gene_scores=exported_score,
-            response_identity=exported_identity,
-            sample_outputs=sample_outputs,
-            sample_packs=sample_packs,
-            selected_indices=selected_indices,
-            random_state=random_state,
-        )
-        if compute_gene_pair
-        else None
+    stacked_obs, stacked_raw, stacked_smooth = _stack_selected_result_space_inputs(
+        sample_outputs=sample_outputs,
+        sample_packs=sample_packs,
+        selected_indices=list(selected_indices),
+        sample_overrides=sample_overrides,
     )
-    if exact_result_ad is not None:
-        if exact_result_ad.X is not None:
-            exact_result_ad.X = np.asarray(exact_result_ad.X, dtype=np.float32)
-        keep_obs_cols = [col for col in ("sample_id", "group_label", "label_raw", "label_last", "original_cell_id") if col in exact_result_ad.obs.columns]
-        exact_result_ad.obs = exact_result_ad.obs.loc[:, keep_obs_cols].copy()
-        keep_var_cols = [col for col in ("response_score", "response_identity", "gene_self_cor", "gene_label_cor") if col in exact_result_ad.var.columns]
-        exact_result_ad.var = exact_result_ad.var.loc[:, keep_var_cols].copy()
-        exact_result_ad.uns["crane_info"] = {
-            "kind": "crane_result_space",
-            "result_space": "post_step2_merge",
-            "sample_count": int(len(sample_outputs)),
-            "gene_pair_cor_available": bool("cor" in exact_result_ad.varp),
-            "representative_sample_ids": tuple(
-                (sample_outputs[idx].metadata.get("sample_id") or sample_packs[idx].sample_id or f"sample_{idx}")
-                for idx in selected_indices
-            ),
-            "balanced_after_dedup": True,
-            "expression_matrix": "X" if exact_result_ad.X is not None else None,
-            "expression_semantics": "exp_mixed_by_cell_graph" if exact_result_ad.X is not None else None,
-            "response_score_source": metadata.get("response_score_source", "final_iteration"),
-            "nondeg_background": nondeg_background,
-            "run": metadata,
-        }
-        return exact_result_ad
 
     merged_obs, merged_raw, merged_smooth = _merge_selected_samples_exact(
         stacked_obs=stacked_obs,
@@ -1098,13 +792,14 @@ def build_result_anndata(
         "result_space": "post_step2_merge",
         "sample_count": int(len(sample_outputs)),
         "gene_pair_cor_available": bool("cor" in result_ad.varp),
-        "representative_sample_ids": tuple(
+        "representative_sample_ids": [
             (sample_outputs[idx].metadata.get("sample_id") or sample_packs[idx].sample_id or f"sample_{idx}")
             for idx in selected_indices
-        ),
+        ],
         "balanced_after_dedup": True,
+        "selected_sample_count": int(len(selected_indices)),
         "expression_matrix": "X",
-        "expression_semantics": "exp_mixed_by_cell_graph",
+        "expression_semantics": "reconstructed_mixed_expression",
         "response_score_source": metadata.get("response_score_source", "final_iteration"),
         "nondeg_background": nondeg_background,
         "graph_fs_mode": graph_fs_mode,
@@ -1115,81 +810,75 @@ def build_result_anndata(
     return result_ad
 
 
-@dataclass
-class CRANEGenePairResult:
-    """Minimal downstream gene-pair correlation result on a CRANE gene-response result space."""
-
-    pair_ad: ad.AnnData
-    source_result_ad: ad.AnnData | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def result_ad(self) -> ad.AnnData:
-        return self.pair_ad
-
-    def __repr__(self) -> str:
-        return f"CRANE gene_pair completed with {self.pair_ad.n_vars} gene(s)."
-
-    __str__ = __repr__
-
-    def correlation_matrix(
-        self,
-        *,
-        as_dataframe: bool = True,
-        copy: bool = True,
-    ) -> pd.DataFrame | np.ndarray:
-        cor = np.asarray(self.pair_ad.varp["cor"], dtype=np.float32)
-        if copy:
-            cor = cor.copy()
-        if not as_dataframe:
-            return cor
-        gene_names = self.pair_ad.var_names.astype(str)
-        return pd.DataFrame(cor, index=gene_names, columns=gene_names)
-
-    def to_anndata(self, copy: bool = True) -> ad.AnnData:
-        return self.pair_ad.copy() if copy else self.pair_ad
+def _clone_crane_info(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(metadata or {})
 
 
-@dataclass
-class CRANEGeneModuleResult:
-    """Lazy downstream gene-module analysis on a CRANE gene-response result space."""
+def _attach_crane_info(frame: pd.DataFrame, metadata: dict[str, Any]) -> pd.DataFrame:
+    frame.attrs["crane_info"] = _clone_crane_info(metadata)
+    return frame
 
-    module_ad: ad.AnnData
-    source_result_ad: ad.AnnData | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def result_ad(self) -> ad.AnnData:
-        return self.module_ad
+def _build_gene_pair_metadata(
+    result: "CRANEResult",
+    *,
+    gene_scope: str,
+    representative_sample_indices: tuple[int, ...],
+) -> dict[str, Any]:
+    return {
+        "kind": "crane_gene_pair_result",
+        "pair_method": "moran",
+        "gene_scope": str(gene_scope),
+        "source_result_space": (
+            dict(result.result_ad.uns.get("crane_info", {}))
+            if result.result_ad is not None and hasattr(result.result_ad, "uns")
+            else {}
+        ),
+        "representative_sample_indices": tuple(int(v) for v in representative_sample_indices),
+    }
 
-    def __repr__(self) -> str:
-        return f"CRANE gene_module completed with {self.module_ad.n_vars} module(s)."
 
-    __str__ = __repr__
+def _build_gene_pair_frame(
+    *,
+    gene_cor: np.ndarray,
+    selected_genes: pd.Index,
+    metadata: dict[str, Any],
+) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        np.asarray(gene_cor, dtype=np.float32),
+        index=selected_genes.copy(),
+        columns=selected_genes.copy(),
+        copy=False,
+    )
+    frame.index.name = "gene"
+    frame.columns.name = "gene"
+    return _attach_crane_info(frame, metadata)
 
-    def summary(
-        self,
-        *,
-        sort_by: str = "module_response_score",
-        ascending: bool = False,
-    ) -> pd.DataFrame:
-        frame = self.module_ad.var.copy()
-        frame.index.name = "module"
-        if sort_by in frame.columns:
-            frame = frame.sort_values(by=sort_by, ascending=ascending)
-        return frame
 
-    def genes(self, module: str) -> pd.DataFrame:
-        gene_map = self.module_ad.uns.get("gene_module_map")
-        if gene_map is None:
-            return pd.DataFrame()
-        module_key = str(module)
-        frame = gene_map.loc[gene_map["module_label"].astype(str) == module_key].copy()
-        frame.index.name = "gene"
-        return frame
+def _format_gene_module_cache_key(
+    *,
+    method: str,
+    gene_scope: str,
+    selected_genes: pd.Index,
+    min_correlation: float,
+    min_size: int,
+) -> str:
+    gene_digest = hashlib.sha1("\x1f".join(selected_genes.astype(str).tolist()).encode("utf-8")).hexdigest()[:12]
+    return (
+        f"method={method}|scope={gene_scope}|corr={float(min_correlation):.6g}|"
+        f"size={int(min_size)}|genes={len(selected_genes)}|sha1={gene_digest}"
+    )
 
-    def to_anndata(self, copy: bool = True) -> ad.AnnData:
-        return self.module_ad.copy() if copy else self.module_ad
+
+def _get_result_ad_gene_module_cache(result: "CRANEResult") -> dict[str, Any] | None:
+    if result.result_ad is None or not isinstance(result.result_ad, ad.AnnData):
+        return None
+    cache = result.result_ad.uns.get("crane_gene_module_cache")
+    if isinstance(cache, dict):
+        return cache
+    cache = {}
+    result.result_ad.uns["crane_gene_module_cache"] = cache
+    return cache
 
 
 def _coerce_gene_list(genes: Any) -> list[str]:
@@ -1209,7 +898,7 @@ def _resolve_gene_scope(
     gene_names: pd.Index,
     response_identity: pd.Series | None,
     genes: Any = None,
-    active_only: bool = False,
+    responsive_only: bool = False,
 ) -> tuple[pd.Index, str]:
     requested = _coerce_gene_list(genes)
     if requested:
@@ -1218,12 +907,12 @@ def _resolve_gene_scope(
             raise ValueError("No requested genes are available in the CRANE result.")
         return selected.copy(), "custom"
 
-    if active_only and response_identity is not None:
-        active_mask = response_identity.reindex(gene_names).fillna(0).astype(np.int8) == 1
-        selected = gene_names[active_mask.to_numpy()]
+    if responsive_only and response_identity is not None:
+        responsive_mask = response_identity.reindex(gene_names).fillna(0).astype(np.int8) == 1
+        selected = gene_names[responsive_mask.to_numpy()]
         if len(selected) == 0:
-            raise ValueError("No active response genes are available for downstream analysis.")
-        return selected.copy(), "active"
+            raise ValueError("No responsive genes are available for downstream analysis.")
+        return selected.copy(), "responsive"
 
     return gene_names.copy(), "all"
 
@@ -1289,7 +978,7 @@ def _build_gene_response_analysis_space(result: "CRANEResult") -> dict[str, Any]
     sample_packs = prepare_step2_packs(
         step1_result.sampling_plan,
         fs_input=step1_result.sampling_plan.init_feature_selection,
-        guide_fs_input=step1_result.sampling_plan.guide_feature_selection,
+        aux_fs_input=step1_result.sampling_plan.aux_feature_selection,
         sample_layer=sample_layer,
     )
     sample_outputs = tuple(step2_result.sample_outputs)
@@ -1304,53 +993,61 @@ def _build_gene_response_analysis_space(result: "CRANEResult") -> dict[str, Any]
     else:
         response_identity = None
 
-    selected_indices = [
-        int(idx) for idx in getattr(step2_result, "representative_sample_indices", ())[: min(3, len(sample_outputs))]
-    ]
-    if not selected_indices:
-        selected_indices = list(range(min(3, len(sample_outputs))))
-
-    raw_blocks: list[np.ndarray] = []
-    smooth_blocks: list[np.ndarray] = []
-    obs_frames: list[pd.DataFrame] = []
-    for sample_idx in selected_indices:
-        pack = sample_packs[sample_idx]
-        output = sample_outputs[sample_idx]
-        raw_blocks.append(np.asarray(pack.exp_raw, dtype=np.float32))
-        smooth_blocks.append(np.asarray(output.exp_last_next, dtype=np.float32))
-        label_raw = np.asarray(pack.label_raw, dtype=np.float32).reshape(-1)
-        label_mixed = np.asarray(output.label_last_next, dtype=np.float32).reshape(-1)
-        control_cells = list(pack.control_cells)
-        case_cells = list(pack.case_cells)
-        ordered_cells = control_cells + case_cells
-        sample_id = output.metadata.get("sample_id") or pack.sample_id or f"sample_{sample_idx}"
-        obs_frames.append(
-            pd.DataFrame(
-                {
-                    "sample_id": sample_id,
-                    "original_cell_id": ordered_cells,
-                    "group_label": ["control"] * len(control_cells) + ["case"] * len(case_cells),
-                    "label_raw": label_raw,
-                    "label_mixed": label_mixed,
-                },
-                index=[f"{sample_id}:{cell_id}" for cell_id in ordered_cells],
-            )
+    result_run_meta = {}
+    if result.result_ad is not None and hasattr(result.result_ad, "uns"):
+        result_run_meta = dict(result.result_ad.uns.get("crane_info", {}).get("run", {}) or {})
+    graph_fs_mode = str(
+        (
+            result.result_ad.uns.get("crane_info", {}).get("graph_fs_mode")
+            if result.result_ad is not None and hasattr(result.result_ad, "uns")
+            else None
         )
-
-    stacked_raw = np.vstack(raw_blocks).astype(np.float32, copy=False)
-    stacked_smooth = np.vstack(smooth_blocks).astype(np.float32, copy=False)
-    stacked_obs = pd.concat(obs_frames, axis=0)
+        or "handoff"
+    ).strip().lower()
+    random_state = int(result_run_meta.get("random_state", 123))
+    selected_indices = _resolve_selected_sample_indices(
+        sample_outputs=sample_outputs,
+        sample_packs=sample_packs,
+        step2_result=step2_result,
+        result_ad=result.result_ad if isinstance(result.result_ad, ad.AnnData) else None,
+        merge_top_n=int(
+            (
+                result.result_ad.uns.get("crane_info", {}).get("selected_sample_count")
+                if result.result_ad is not None and hasattr(result.result_ad, "uns")
+                else 3
+            )
+            or 3
+        ),
+        merge_mode="step2_representative",
+    )
+    result_space_identity, _, sample_overrides = _resolve_result_space_identity(
+        gene_names=gene_names,
+        response_identity=response_identity,
+        step2_result=step2_result,
+        graph_fs_mode=graph_fs_mode,
+        sample_outputs=sample_outputs,
+        sample_packs=sample_packs,
+        selected_indices=selected_indices,
+    )
+    stacked_obs, stacked_raw, stacked_smooth = _stack_selected_result_space_inputs(
+        sample_outputs=sample_outputs,
+        sample_packs=sample_packs,
+        selected_indices=selected_indices,
+        sample_overrides=sample_overrides,
+    )
     merged_obs, merged_raw, merged_smooth = _merge_selected_samples_exact(
         stacked_obs=stacked_obs,
         stacked_raw=stacked_raw,
         stacked_smooth=stacked_smooth,
+        random_state=random_state,
     )
     rebuilt_exp, rebuilt_label, _, gene_self_cor, affinity, gene_label_cor = _build_reconstructed_result_space(
         gene_names=gene_names,
-        response_identity=response_identity,
+        response_identity=result_space_identity if result_space_identity is not None else response_identity,
         merged_obs=merged_obs,
         merged_raw=merged_raw,
         merged_smooth=merged_smooth,
+        random_state=random_state,
         compute_gene_pair=False,
     )
 
@@ -1392,53 +1089,55 @@ def _build_gene_pair_analysis(
     *,
     selected_genes: pd.Index,
     gene_scope: str,
-) -> CRANEGenePairResult:
+) -> tuple[np.ndarray, dict[str, Any]]:
     analysis_space = result._get_gene_response_analysis_space()
+    metadata = _build_gene_pair_metadata(
+        result,
+        gene_scope=gene_scope,
+        representative_sample_indices=analysis_space["representative_sample_indices"],
+    )
+
+    if result.result_ad is not None and isinstance(result.result_ad, ad.AnnData) and "cor" in result.result_ad.varp:
+        result_gene_names = pd.Index(result.result_ad.var_names.copy(), name="gene")
+        selected_index = result_gene_names.get_indexer(selected_genes)
+        if np.all(selected_index >= 0):
+            full_cor = np.asarray(result.result_ad.varp["cor"], dtype=np.float32)
+            if full_cor.shape == (len(result_gene_names), len(result_gene_names)):
+                return full_cor[np.ix_(selected_index, selected_index)], metadata
+
     selected_index = analysis_space["gene_names"].get_indexer(selected_genes)
-    exp_selected = analysis_space["expression"][:, selected_index]
+    exp_selected = np.asarray(analysis_space["expression"][:, selected_index], dtype=np.float32)
     affinity_dense = np.asarray(analysis_space["affinity"].toarray(), dtype=np.float32)
     gene_cor = _compute_sp_moran_between(exp_selected, exp_selected, affinity_dense.copy()).astype(np.float32, copy=False)
 
-    pair_ad = ad.AnnData(
-        X=np.zeros((0, len(selected_genes)), dtype=np.float32),
-        obs=pd.DataFrame(index=pd.Index([], dtype=str)),
-        var=pd.DataFrame(index=selected_genes.copy()),
-    )
-    pair_ad.varp["cor"] = gene_cor
-    pair_ad.uns["crane_info"] = {
-        "kind": "crane_gene_pair_result",
-        "pair_method": "moran",
-        "gene_scope": gene_scope,
-        "source_result_space": (
-            dict(result.result_ad.uns.get("crane_info", {}))
-            if result.result_ad is not None and hasattr(result.result_ad, "uns")
-            else {}
-        ),
-        "representative_sample_indices": analysis_space["representative_sample_indices"],
-    }
-    return CRANEGenePairResult(
-        pair_ad=pair_ad,
-        source_result_ad=result.result_ad if isinstance(result.result_ad, ad.AnnData) else None,
-        metadata={"mode": "gene_pair", "gene_scope": gene_scope},
-    )
+    if (
+        result.result_ad is not None
+        and isinstance(result.result_ad, ad.AnnData)
+        and pd.Index(result.result_ad.var_names.copy(), name="gene").equals(selected_genes)
+    ):
+        result.result_ad.varp["cor"] = gene_cor
+        crane_info = dict(result.result_ad.uns.get("crane_info", {}))
+        crane_info["gene_pair_cor_available"] = True
+        crane_info["pair_method"] = "moran"
+        result.result_ad.uns["crane_info"] = crane_info
+    return gene_cor, metadata
 
 
 def _build_gene_module_analysis(
     result: "CRANEResult",
     *,
-    pair_result: CRANEGenePairResult,
+    selected_genes: pd.Index,
+    gene_scope: str,
+    gene_cor: np.ndarray,
+    pair_metadata: dict[str, Any],
     method: str,
     min_correlation: float,
     min_size: int,
-) -> CRANEGeneModuleResult:
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     if min_size < 2:
         raise ValueError("gene_module() requires min_size >= 2.")
 
     analysis_space = result._get_gene_response_analysis_space()
-    selected_genes = pair_result.pair_ad.var_names.copy()
-    selected_index = analysis_space["gene_names"].get_indexer(selected_genes)
-    exp_selected = np.asarray(analysis_space["expression"][:, selected_index], dtype=np.float32)
-    gene_cor = np.asarray(pair_result.pair_ad.varp["cor"], dtype=np.float32)
     response_identity = (
         analysis_space["response_identity"].reindex(selected_genes).fillna(0).astype(np.int8)
         if analysis_space["response_identity"] is not None
@@ -1464,82 +1163,27 @@ def _build_gene_module_analysis(
     if not valid_modules:
         raise ValueError("No gene modules passed the current min_correlation/min_size thresholds.")
 
-    exp_mean = exp_selected.mean(axis=0)
-    exp_std = exp_selected.std(axis=0, ddof=0)
-    exp_std[exp_std == 0] = 1.0
-    exp_scaled = ((exp_selected - exp_mean) / exp_std).astype(np.float32, copy=False)
-    label = np.asarray(analysis_space["label"], dtype=np.float32).reshape(-1, 1)
-    affinity_dense = np.asarray(analysis_space["affinity"].toarray(), dtype=np.float32)
-    module_scores: list[np.ndarray] = []
-    module_meta_rows: list[dict[str, Any]] = []
-    gene_module_map = analysis_space["var"].reindex(selected_genes).copy()
+    gene_module_map = pd.DataFrame(index=selected_genes.copy())
     gene_module_map["module_backend_label"] = backend_labels.reindex(selected_genes).astype(str)
     gene_module_map["module_label"] = "unassigned"
 
     for module_idx, (backend_label, member_idx) in enumerate(valid_modules, start=1):
         module_label = f"M{module_idx}"
         module_genes = selected_genes[member_idx]
-        module_signal = exp_scaled[:, member_idx].mean(axis=1).astype(np.float32, copy=False)
-        module_signal_2d = module_signal.reshape(-1, 1)
-        module_self = float(_compute_sp_moran_between(module_signal_2d, module_signal_2d, affinity_dense.copy())[0, 0])
-        module_label_cor = float(_compute_sp_moran_between(module_signal_2d, label, affinity_dense.copy())[0, 0])
-        module_response_score = float(np.sqrt(module_self**2 + module_label_cor**2) / np.sqrt(2.0))
-        module_cor_block = gene_cor[np.ix_(member_idx, member_idx)]
-        if module_cor_block.shape[0] > 1:
-            upper = np.triu_indices(module_cor_block.shape[0], k=1)
-            mean_within_cor = float(np.mean(module_cor_block[upper])) if upper[0].size else 0.0
-        else:
-            mean_within_cor = 0.0
-        module_scores.append(module_signal)
         gene_module_map.loc[module_genes, "module_label"] = module_label
-        module_meta_rows.append(
-            {
-                "module_label": module_label,
-                "gene_count": int(len(module_genes)),
-                "module_backend_label": str(backend_label),
-                "response_gene_count": int(
-                    gene_module_map.loc[module_genes, "response_identity"].fillna(0).astype(np.int8).sum()
-                )
-                if "response_identity" in gene_module_map.columns
-                else int(len(module_genes)),
-                "module_self_cor": float(module_self),
-                "module_label_cor": float(module_label_cor),
-                "module_response_score": float(module_response_score),
-                "mean_within_cor": float(mean_within_cor),
-                "mean_gene_score": float(gene_module_map.loc[module_genes, "response_score"].astype(np.float32).mean())
-                if "response_score" in gene_module_map.columns
-                else 0.0,
-            }
-        )
 
-    module_matrix = np.column_stack(module_scores).astype(np.float32, copy=False)
-    module_var = pd.DataFrame(module_meta_rows).set_index("module_label")
-    module_ad = ad.AnnData(
-        X=module_matrix,
-        obs=analysis_space["obs"].copy(),
-        var=module_var,
-    )
-    module_ad.obsp["affinity"] = analysis_space["affinity"].copy()
-    module_ad.uns["gene_module_map"] = gene_module_map
-    module_ad.uns["crane_info"] = {
+    gene_module_map.index.name = "gene"
+    metadata = {
         "kind": "crane_gene_module_result",
         "module_method": backend_method,
         "module_method_requested": str(method).strip().lower(),
         "min_correlation": float(min_correlation),
         "min_size": int(min_size),
-        "source_gene_pair": dict(pair_result.pair_ad.uns.get("crane_info", {})),
+        "gene_scope": str(gene_scope),
+        "module_count": int(len(valid_modules)),
+        "source_gene_pair": _clone_crane_info(pair_metadata),
     }
-    return CRANEGeneModuleResult(
-        module_ad=module_ad,
-        source_result_ad=result.result_ad if isinstance(result.result_ad, ad.AnnData) else None,
-        metadata={
-            "mode": "gene_module",
-            "method": backend_method,
-            "method_requested": str(method).strip().lower(),
-            "min_correlation": float(min_correlation),
-            "min_size": int(min_size),
-        },
-    )
+    return _attach_crane_info(gene_module_map, metadata), metadata
 
 
 @dataclass
@@ -1565,7 +1209,7 @@ class CRANEResult:
                     "Use .summary() to view the gene-response summary.\n"
                     "Use .gene_pair() or .gene_module() for gene-pair / gene-module analysis.\n"
                     "Use crane.tl.cell_response(...), crane.tl.extension_response(...), or crane.tl.function_response(...) for other downstream analyses.\n"
-                    "Tutorial: CRANE GitHub repository URL will be added after sync."
+                    "Tutorial: CRANE GitHub repository https://github.com/caodudu/crane."
                 )
             return (
                 "CRANE result completed.\n"
@@ -1658,6 +1302,22 @@ class CRANEResult:
             score = score / np.sqrt(2.0)
         return pd.Series(np.asarray(score, dtype=np.float32), index=gene_self_cor.index.copy(), name="response_score")
 
+    def _center_summary_response_score(
+        self,
+        *,
+        response_score: pd.Series,
+        response_identity: pd.Series | None,
+    ) -> pd.Series:
+        if response_identity is None:
+            return response_score.astype(np.float32)
+        ri = response_identity.reindex(response_score.index).fillna(0).astype(np.int8)
+        background = response_score.loc[ri == 0].astype(np.float32)
+        if len(background) == 0:
+            return response_score.astype(np.float32)
+        centered = response_score.astype(np.float32) - np.float32(background.median())
+        centered = np.maximum(np.asarray(centered, dtype=np.float32), 0.0)
+        return pd.Series(np.asarray(centered, dtype=np.float32), index=response_score.index.copy(), name="response_score")
+
     def evaluate_function(
         self,
         adata: Any | None = None,
@@ -1690,61 +1350,100 @@ class CRANEResult:
         self,
         *,
         genes: Any = None,
-        active_only: bool = False,
+        responsive_only: bool = False,
         use_cache: bool = True,
-    ) -> CRANEGenePairResult:
-        """Run explicit gene-pair Moran correlation on the gene-response result space."""
+    ) -> pd.DataFrame:
+        """Return the gene-pair Moran correlation matrix for the current gene-response result."""
 
         analysis_space = self._get_gene_response_analysis_space()
         selected_genes, gene_scope = _resolve_gene_scope(
             gene_names=analysis_space["gene_names"],
             response_identity=analysis_space["response_identity"],
             genes=genes,
-            active_only=active_only,
+            responsive_only=responsive_only,
         )
-        cache_key = ("gene_pair", gene_scope, _format_gene_scope_key(selected_genes))
+        cache_key = ("gene_pair_matrix", gene_scope, _format_gene_scope_key(selected_genes))
         if use_cache and cache_key in self._analysis_cache:
-            return self._analysis_cache[cache_key]
-        pair_result = _build_gene_pair_analysis(
+            gene_cor, pair_metadata = self._analysis_cache[cache_key]
+            return _build_gene_pair_frame(gene_cor=gene_cor, selected_genes=selected_genes, metadata=pair_metadata)
+        gene_cor, pair_metadata = _build_gene_pair_analysis(
             self,
             selected_genes=selected_genes,
             gene_scope=gene_scope,
         )
         if use_cache:
-            self._analysis_cache[cache_key] = pair_result
-        return pair_result
+            self._analysis_cache[cache_key] = (gene_cor, pair_metadata)
+        return _build_gene_pair_frame(gene_cor=gene_cor, selected_genes=selected_genes, metadata=pair_metadata)
 
     def gene_module(
         self,
         *,
         method: str = "auto",
         genes: Any = None,
-        active_only: bool = False,
-        pair: CRANEGenePairResult | None = None,
+        responsive_only: bool = False,
         min_correlation: float = 0.2,
         min_size: int = 5,
         use_cache: bool = True,
-    ) -> CRANEGeneModuleResult:
-        """Run explicit gene-module analysis on the gene-response result space."""
+    ) -> pd.DataFrame:
+        """Return the gene-to-module assignment table for the current gene-response result."""
 
-        if pair is not None and genes is not None:
-            raise ValueError("gene_module() accepts either pair=... or genes=..., not both.")
-        pair_result = pair or self.gene_pair(genes=genes, active_only=active_only, use_cache=use_cache)
-        pair_key = tuple(str(v) for v in pair_result.pair_ad.var_names.tolist())
-        method_normalized = resolve_gene_module_method(method, len(pair_key))
-        cache_key = ("gene_module", method_normalized, pair_key, float(min_correlation), int(min_size))
+        analysis_space = self._get_gene_response_analysis_space()
+        selected_genes, gene_scope = _resolve_gene_scope(
+            gene_names=analysis_space["gene_names"],
+            response_identity=analysis_space["response_identity"],
+            genes=genes,
+            responsive_only=responsive_only,
+        )
+        method_normalized = resolve_gene_module_method(method, len(selected_genes))
+        module_cache_token = _format_gene_module_cache_key(
+            method=method_normalized,
+            gene_scope=gene_scope,
+            selected_genes=selected_genes,
+            min_correlation=float(min_correlation),
+            min_size=int(min_size),
+        )
+        cache_key = ("gene_module_table", module_cache_token)
         if use_cache and cache_key in self._analysis_cache:
-            return self._analysis_cache[cache_key]
-        module_result = _build_gene_module_analysis(
+            cached_frame = self._analysis_cache[cache_key]
+            frame = cached_frame.copy(deep=True)
+            frame.attrs["crane_info"] = _clone_crane_info(cached_frame.attrs.get("crane_info"))
+            return frame
+
+        result_ad_cache = _get_result_ad_gene_module_cache(self)
+        if use_cache and result_ad_cache is not None and module_cache_token in result_ad_cache:
+            cached_entry = result_ad_cache[module_cache_token]
+            if isinstance(cached_entry, dict) and isinstance(cached_entry.get("table"), pd.DataFrame):
+                cached_frame = cached_entry["table"].copy(deep=True)
+                cached_frame.attrs["crane_info"] = _clone_crane_info(cached_entry.get("info"))
+                self._analysis_cache[cache_key] = cached_frame.copy(deep=True)
+                self._analysis_cache[cache_key].attrs["crane_info"] = _clone_crane_info(cached_frame.attrs.get("crane_info"))
+                return cached_frame
+
+        gene_cor, pair_metadata = _build_gene_pair_analysis(
             self,
-            pair_result=pair_result,
+            selected_genes=selected_genes,
+            gene_scope=gene_scope,
+        )
+        module_frame, module_metadata = _build_gene_module_analysis(
+            self,
+            selected_genes=selected_genes,
+            gene_scope=gene_scope,
+            gene_cor=gene_cor,
+            pair_metadata=pair_metadata,
             method=method,
             min_correlation=float(min_correlation),
             min_size=int(min_size),
         )
         if use_cache:
-            self._analysis_cache[cache_key] = module_result
-        return module_result
+            cached_frame = module_frame.copy(deep=True)
+            cached_frame.attrs["crane_info"] = _clone_crane_info(module_metadata)
+            self._analysis_cache[cache_key] = cached_frame
+            if result_ad_cache is not None:
+                result_ad_cache[module_cache_token] = {
+                    "table": cached_frame.copy(deep=True),
+                    "info": _clone_crane_info(module_metadata),
+                }
+        return module_frame
 
     def summary(
         self,
@@ -1754,19 +1453,16 @@ class CRANEResult:
         ascending: bool = False,
         represent: str = "mean",
         normalized: bool = False,
-        active_only: bool | None = None,
+        centered: bool = False,
     ) -> pd.DataFrame:
         """Return the user-facing CRANE summary table.
 
         For gene-response runs, this is the gene-level response summary rather
-        than an internal runtime/state dump. By default it focuses on genes in
-        the final response identity.
+        than an internal runtime/state dump.
         """
 
         if self.gene_scores is not None:
             frame = pd.DataFrame(index=self.gene_scores.index.copy())
-            if active_only is not None:
-                responsive_only = bool(active_only)
             represent_normalized = str(represent).strip().lower()
             if represent_normalized not in {"mean", "reconst"}:
                 raise ValueError("summary(represent=...) must be 'mean' or 'reconst'.")
@@ -1807,6 +1503,19 @@ class CRANEResult:
                     )
                 else:
                     frame["response_score"] = self.gene_scores.astype(np.float32)
+            if centered and "response_score" in frame.columns:
+                frame["response_score"] = self._center_summary_response_score(
+                    response_score=frame["response_score"],
+                    response_identity=frame["response_identity"] if "response_identity" in frame.columns else None,
+                )
+            ordered_cols = [
+                col
+                for col in ("response_identity", "response_score", "gene_self_cor", "gene_label_cor")
+                if col in frame.columns
+            ]
+            trailing_cols = [col for col in frame.columns if col not in ordered_cols]
+            if ordered_cols or trailing_cols:
+                frame = frame.loc[:, ordered_cols + trailing_cols]
             if responsive_only and "response_identity" in frame.columns:
                 frame = frame.loc[frame["response_identity"] == 1].copy()
             if sort_by in frame.columns:

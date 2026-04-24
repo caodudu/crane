@@ -1,4 +1,4 @@
-"""Structured logging protocol for the new CRANE package.
+"""Structured logging protocol for the CRANE package.
 
 This module intentionally avoids logging every internal design detail.
 At paper stage, default logs should stay concise:

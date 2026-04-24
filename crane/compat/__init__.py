@@ -1,1 +1,1 @@
-"""Compatibility helpers for transitional CRANE development."""
+"""Compatibility helpers for CRANE."""

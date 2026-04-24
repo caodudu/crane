@@ -1,8 +1,7 @@
-"""Numerical kernels for the default no-module Step 2 mainline.
+"""Numerical kernels for the default Step 2 path.
 
-This module intentionally does not import ``script.couture``.  Heavy optional
-dependencies are imported inside the functions that need them so importing the
-Step 2 package itself stays light.
+Heavy optional dependencies are imported inside the functions that need them so
+importing the Step 2 package itself stays light.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from .contracts import Step2Options, Step2SampleOutput, Step2SamplePack
 
 
 def ensure_float_type(data: np.ndarray, target_dtype: str = "float32") -> np.ndarray:
-    """Match the legacy helper that coerces arrays to a target floating dtype."""
+    """Coerce arrays to a target floating dtype when needed."""
 
     if target_dtype not in {"float16", "float32", "float64"}:
         raise ValueError("target_dtype must be 'float16', 'float32', or 'float64'")
@@ -23,7 +22,7 @@ def ensure_float_type(data: np.ndarray, target_dtype: str = "float32") -> np.nda
 
 
 def pca_select(mat: np.ndarray, n_pcs: int = 50) -> np.ndarray:
-    """Legacy-aligned PCA selection using scanpy when enough dimensions exist."""
+    """Run PCA with scanpy when enough dimensions are available."""
 
     if n_pcs == -1 or min(mat.shape) < n_pcs:
         return mat
@@ -36,7 +35,7 @@ def pca_select(mat: np.ndarray, n_pcs: int = 50) -> np.ndarray:
 
 
 def compute_distance_cosine(mat: np.ndarray, normalized: bool = True) -> np.ndarray:
-    """Compute legacy cosine distance, optionally divided by 2."""
+    """Compute cosine distance, optionally divided by 2."""
 
     from scipy.spatial.distance import pdist, squareform
 
@@ -48,7 +47,7 @@ def compute_distance_cosine(mat: np.ndarray, normalized: bool = True) -> np.ndar
 
 
 def adaptive_knn(distance_matrix: np.ndarray, n_neighbors: int = 10, delta: float = -0.5) -> np.ndarray:
-    """Build the legacy adaptive symmetric KNN graph and force-connect by MST."""
+    """Build the adaptive symmetric KNN graph and force-connect by MST."""
 
     total_neighbors = n_neighbors + 1
     inds = np.argsort(distance_matrix, axis=1)[:, :total_neighbors]
@@ -80,7 +79,7 @@ def is_connected(adj: np.ndarray) -> bool:
 
 
 def connect_disconnected_mst(adj: np.ndarray, distance_matrix: np.ndarray) -> np.ndarray:
-    """Union the current graph with the distance MST, matching legacy intent."""
+    """Union the current graph with the distance MST."""
 
     import igraph as ig
 
@@ -109,7 +108,7 @@ def heat_kernel_smoothing(
     property_matrix: np.ndarray,
     beta: float = 0.1,
 ) -> np.ndarray:
-    """Legacy heat-kernel smoothing; dense expm is faster for Step2's small graphs."""
+    """Heat-kernel smoothing; dense ``expm`` is fast for Step 2's small graphs."""
 
     from scipy.linalg import expm
 
@@ -127,7 +126,7 @@ def overlay_raw_exp(
     weight: float,
     mode: str = "raw",
 ) -> np.ndarray:
-    """Legacy overlay rule for expression and label signals."""
+    """Overlay raw and smoothed expression or label signals."""
 
     if iter_round == 0:
         return exp_raw
@@ -149,7 +148,7 @@ def overlay_raw_exp(
 
 
 def bounded_deviation(values: np.ndarray, floor: float = 0.05) -> float:
-    """Small-sample guard matching the legacy response-threshold behavior."""
+    """Robust deviation estimate for small-sample thresholding."""
 
     data = np.asarray(values, dtype=np.float64)
     if data.size == 0:
@@ -238,19 +237,19 @@ def compute_sp_moran_between_col(
     )
 
 
-def compare_graph_moran(label_guide: np.ndarray, adj_mat_i: np.ndarray, adj_mat_guide: np.ndarray) -> bool:
-    """Legacy guide-graph compare rule used to decide whether guide fallback is still needed."""
+def _prefer_active_graph(reference_label: np.ndarray, active_adj_mat: np.ndarray, aux_adj_mat: np.ndarray) -> bool:
+    """Compare two graph paths and keep the active path when it clears the frozen rule."""
 
-    # Match the legacy guide compare behavior without pulling in external Moran dependencies.
-    moran_score_i = round(
-        compute_sp_moran_between_col(label_guide, label_guide, adj_mat_i, row_standardize=True),
+    # Keep the frozen comparison rule while avoiding any extra dependency path here.
+    active_score = round(
+        compute_sp_moran_between_col(reference_label, reference_label, active_adj_mat, row_standardize=True),
         6,
     )
-    moran_score_guide = round(
-        compute_sp_moran_between_col(label_guide, label_guide, adj_mat_guide, row_standardize=True),
+    aux_score = round(
+        compute_sp_moran_between_col(reference_label, reference_label, aux_adj_mat, row_standardize=True),
         6,
     )
-    return bool(moran_score_i >= (moran_score_guide**2))
+    return bool(active_score >= (aux_score**2))
 
 
 def compute_gene_moran_scores(
@@ -340,7 +339,7 @@ def update_response_identity(
     threshold_k: float = 2.0,
     drop_limit: bool = True,
 ) -> tuple[np.ndarray, dict[str, float | int]]:
-    """Monotone RI update for the default no-module Step 2 path."""
+    """Monotone RI update for the default Step 2 path."""
 
     current = np.asarray(current_ri, dtype=bool)
     score = np.asarray(response_score, dtype=np.float32)
@@ -381,7 +380,7 @@ def update_response_identity_with_stage(
     update_stage: str = "strict",
     fs_strict_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, float | int | str]]:
-    """Legacy-aligned RI update with strict/wave stage semantics."""
+    """RI update with strict/wave stage semantics."""
 
     current = np.asarray(current_ri, dtype=bool)
     score = np.asarray(response_score, dtype=np.float32)
@@ -440,7 +439,7 @@ def label_nh_prop_moran(
     label_last: np.ndarray,
     fs_mask: np.ndarray,
 ) -> np.ndarray:
-    """Default legacy label continuization path: Moran score plus strict control zeroing."""
+    """Default Step 2 label continuization path."""
 
     from sklearn.metrics.pairwise import cosine_similarity
 
@@ -520,10 +519,10 @@ def run_sample_core(
     pack: Step2SamplePack,
     exp_last: np.ndarray | None,
     label_last: np.ndarray | None,
-    guide_pass: bool = False,
+    branch_ready: bool = False,
     options: Step2Options | None = None,
 ) -> Step2SampleOutput:
-    """Run one sample through the default no-module Step 2 mainline."""
+    """Run one sample through the default Step 2 path."""
 
     options = options or Step2Options()
     exp_raw = ensure_float_type(pack.exp_raw, target_dtype=options.dtype)
@@ -541,36 +540,34 @@ def run_sample_core(
         iter_round=iter_round,
         options=options,
     )
-    next_guide_pass = True
-    guide_fs_mask = pack.guide_fs_mask
-    guide_compare_rounds = options._guide_compare_rounds
-    guide_within_round_limit = True
-    if guide_compare_rounds is not None:
-        guide_compare_rounds = int(guide_compare_rounds)
-        if guide_compare_rounds > 0:
-            guide_within_round_limit = iter_round <= guide_compare_rounds
-    guide_enabled = bool(
-        guide_within_round_limit
-        and guide_fs_mask is not None
-        and np.any(guide_fs_mask)
-        and not guide_pass
+    next_branch_ready = True
+    aux_fs_mask = pack.aux_fs_mask
+    compare_round_cap = options._guide_compare_rounds
+    within_compare_window = True
+    if compare_round_cap is not None:
+        compare_round_cap = int(compare_round_cap)
+        if compare_round_cap > 0:
+            within_compare_window = iter_round <= compare_round_cap
+    aux_path_enabled = bool(
+        within_compare_window
+        and aux_fs_mask is not None
+        and np.any(aux_fs_mask)
+        and not branch_ready
     )
-    if guide_enabled:
-        guide_affinity, guide_exp_denoised, guide_exp_mixed, _, _ = _run_graph_path(
+    if aux_path_enabled:
+        aux_affinity, aux_exp_denoised, aux_exp_mixed, _, _ = _run_graph_path(
             exp_raw=exp_raw,
             exp_last_arr=exp_last_arr,
             label_raw=label_raw,
             label_last_arr=label_last_arr,
-            fs_mask=np.asarray(guide_fs_mask),
+            fs_mask=np.asarray(aux_fs_mask),
             iter_round=iter_round,
             options=options,
         )
-        # Legacy guide flow keeps the guide-smoothed expression state either way;
-        # graph compare only decides which affinity/label branch is retained.
-        exp_denoised = guide_exp_denoised
-        exp_mixed = guide_exp_mixed
+        exp_denoised = aux_exp_denoised
+        exp_mixed = aux_exp_mixed
         label_smooth = label_nh_prop_moran(
-            exp_mat=guide_exp_mixed,
+            exp_mat=aux_exp_mixed,
             adj_mat=affinity,
             label_raw=label_raw,
             label_last=label_last_arr,
@@ -587,31 +584,29 @@ def run_sample_core(
             ),
             target_dtype=options.dtype,
         )
-        guide_label_smooth = label_nh_prop_moran(
-            exp_mat=guide_exp_mixed,
-            # Legacy guide path keeps the guide-smoothed expression but still
-            # continuizes the guide label on the input affinity before compare.
+        aux_label_smooth = label_nh_prop_moran(
+            exp_mat=aux_exp_mixed,
             adj_mat=affinity,
             label_raw=label_raw,
             label_last=label_last_arr,
-            fs_mask=np.asarray(guide_fs_mask),
+            fs_mask=np.asarray(aux_fs_mask),
         )
-        guide_label_mixed = ensure_float_type(
+        aux_label_mixed = ensure_float_type(
             overlay_raw_exp(
                 exp_raw=label_raw,
                 exp_last=label_last_arr,
-                f_exp_last=guide_label_smooth,
+                f_exp_last=aux_label_smooth,
                 iter_round=iter_round,
                 weight=options._smooth_weight,
                 mode="decrease",
             ),
             target_dtype=options.dtype,
         )
-        next_guide_pass = compare_graph_moran(guide_label_smooth, affinity, guide_affinity)
-        if not next_guide_pass:
-            affinity = guide_affinity
-            label_smooth = guide_label_smooth
-            label_mixed = guide_label_mixed
+        next_branch_ready = _prefer_active_graph(aux_label_smooth, affinity, aux_affinity)
+        if not next_branch_ready:
+            affinity = aux_affinity
+            label_smooth = aux_label_smooth
+            label_mixed = aux_label_mixed
     gene_self, gene_label, combined_score = compute_gene_moran_scores(
         exp_denoised=exp_denoised,
         label_smooth=label_smooth,
@@ -629,7 +624,7 @@ def run_sample_core(
         gene_label_cor=gene_label,
         combined_score=combined_score,
         norm_combined_score=norm_score,
-        guide_pass_next=next_guide_pass,
+        branch_ready_next=next_branch_ready,
         metadata={
             "sample_id": pack.sample_id,
             "cell_count": int(exp_raw.shape[0]),
@@ -637,8 +632,8 @@ def run_sample_core(
             "selected_gene_count": int(np.sum(fs_mask == 1)),
             "deg_total_summary": retained_center,
             "nondeg_total_summary": background_center,
-            "guide_active_genes": int(np.sum(guide_fs_mask == 1)) if guide_fs_mask is not None else 0,
-            "guide_used": bool(guide_enabled),
-            "guide_pass_next": bool(next_guide_pass),
+            "guide_active_genes": int(np.sum(aux_fs_mask == 1)) if aux_fs_mask is not None else 0,
+            "guide_used": bool(aux_path_enabled),
+            "guide_pass_next": bool(next_branch_ready),
         },
     )

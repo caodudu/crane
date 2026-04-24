@@ -1,1 +1,1 @@
-"""Optional diagnostics placeholders for future CRANE wiring."""
+"""Optional diagnostics hooks reserved for future CRANE maintenance."""

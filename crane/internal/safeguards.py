@@ -1,1 +1,1 @@
-"""Internal safeguard placeholders for output-preserving migration."""
+"""Internal safeguard hooks for behavior-preserving maintenance."""

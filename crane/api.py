@@ -1,4 +1,4 @@
-"""Compatibility wrappers for the top-level CRANE API."""
+"""Top-level CRANE API wrappers."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .tl import gene_response
 
 
 class CRANE:
-    """Compatibility entry class that delegates to the tool-level API."""
+    """Entry class that delegates to the tool-level API."""
 
     def __init__(
         self,
@@ -30,6 +30,7 @@ class CRANE:
         **overrides: Any,
     ) -> CRANEResult:
         """Run CRANE through the stable gene-response API."""
+        overrides.pop("random_state", None)
         return gene_response(
             adata=adata,
             perturbation_key=perturbation_key,
@@ -39,7 +40,6 @@ class CRANE:
             key_added=overrides.pop("key_added", "crane"),
             inplace=False,
             copy=False,
-            random_state=overrides.pop("random_state", self.runtime.random_state),
             config=self.config,
             logger_config=self.logger_config,
             **overrides,
@@ -55,7 +55,8 @@ def run_crane(
     logger_config: LoggerConfig | None = None,
     **overrides: Any,
 ) -> CRANEResult:
-    """Compatibility wrapper around :func:`crane.tl.gene_response`."""
+    """Convenience wrapper around :func:`crane.tl.gene_response`."""
+    overrides.pop("random_state", None)
     return gene_response(
         adata=adata,
         perturbation_key=perturbation_key,
@@ -65,10 +66,6 @@ def run_crane(
         key_added=overrides.pop("key_added", "crane"),
         inplace=False,
         copy=False,
-        random_state=overrides.pop(
-            "random_state",
-            None if runtime is None else runtime.random_state,
-        ),
         config=config,
         logger_config=logger_config,
         **overrides,

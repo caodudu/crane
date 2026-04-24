@@ -1,4 +1,4 @@
-"""Formal Step 1 mainline for the new CRANE package."""
+"""Default Step 1 feature selection and tendency evaluation for CRANE."""
 
 from __future__ import annotations
 
@@ -43,11 +43,11 @@ class Step1Options:
 
 @dataclass(frozen=True)
 class Step1FeatureSelectionResult:
-    """Legacy-aligned Step 1 feature-selection payload."""
+    """Step 1 feature-selection outputs passed to the next stage."""
 
     default_fs: pd.DataFrame
     working_adata: Any
-    guide_fs: pd.Series
+    aux_fs: pd.Series
     margin_eval: pd.DataFrame
     screen_result: KSFeatureScreenResult
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -81,7 +81,7 @@ def _compute_variability(working_adata: ad.AnnData) -> pd.Series:
     return pd.Series(np.median(absolute_deviation, axis=0), index=working_adata.var_names.copy())
 
 
-def _find_flat_point(y: np.ndarray, window_size: int = 2, relative_epsilon_factor: float = 0.3) -> int:
+def _find_stable_curve_index(y: np.ndarray, window_size: int = 2, relative_epsilon_factor: float = 0.3) -> int:
     df = pd.DataFrame({"y": y})
     df["y"] = df["y"].replace({None: np.nan}).bfill()
     df["y_smooth"] = df["y"].rolling(window=window_size, center=True).mean()
@@ -104,7 +104,7 @@ def _find_flat_point(y: np.ndarray, window_size: int = 2, relative_epsilon_facto
     return int(found_index if found_index is not None else len(df) - 1)
 
 
-def _build_margin_eval(screen_result: KSFeatureScreenResult, feature_names: np.ndarray) -> pd.DataFrame:
+def _build_margin_table(screen_result: KSFeatureScreenResult, feature_names: np.ndarray) -> pd.DataFrame:
     rank = np.empty_like(screen_result.ranking)
     rank[screen_result.ranking] = np.arange(screen_result.ranking.shape[0], dtype=int)
     return pd.DataFrame(
@@ -112,7 +112,7 @@ def _build_margin_eval(screen_result: KSFeatureScreenResult, feature_names: np.n
             "Feature": feature_names,
             "rank": rank,
             "statistic": screen_result.statistic,
-            "p-value": screen_result.guide_raw_pvalues,
+            "p-value": screen_result.window_raw_pvalues,
             "adj_p-value": screen_result.adj_pvalues,
         }
     )
@@ -161,9 +161,9 @@ def _compute_init_ratio_distance_curve(
     case_expression: np.ndarray,
     init_ratio_set: Sequence[float],
 ) -> list[tuple[float, float]]:
-    """Compute the legacy init-ratio distance curve without repeated prefixes.
+    """Compute the init-ratio distance curve without repeated prefixes.
 
-    Legacy compares full-feature and prefix-feature normalized Euclidean
+    This compares full-feature and prefix-feature normalized Euclidean
     distance matrices. Squared Euclidean distances are additive over feature
     blocks, so prefix distances can be accumulated exactly in condensed form.
     """
@@ -240,29 +240,29 @@ def run_feature_selection(
         feature_names=feature_names,
         options=options.feature_screen_options,
     )
-    margin_eval = _build_margin_eval(screen_result=screen_result, feature_names=feature_names)
-    margin_eval.index = margin_eval["Feature"]
+    margin_table = _build_margin_table(screen_result=screen_result, feature_names=feature_names)
+    margin_table.index = margin_table["Feature"]
 
     ranked_features = feature_names[screen_result.ranking].tolist()
-    coarse_deg = feature_names[screen_result.coarse_mask].tolist()
-    core_deg = feature_names[screen_result.core_mask].tolist()
-    guide_deg = feature_names[screen_result.guide_mask].tolist()
+    coarse_features = feature_names[screen_result.coarse_mask].tolist()
+    core_features = feature_names[screen_result.core_mask].tolist()
+    aux_features = feature_names[screen_result.window_mask].tolist()
 
-    default_fs_all = pd.DataFrame({"gene": feature_names}, index=feature_names)
-    default_fs_all["i_0"] = default_fs_all.index.isin(coarse_deg).astype(np.int8)
+    full_feature_frame = pd.DataFrame({"gene": feature_names}, index=feature_names)
+    full_feature_frame["i_0"] = full_feature_frame.index.isin(coarse_features).astype(np.int8)
     variability = _compute_variability(working_adata=step1_adata)
-    extra_genes_set = _coerce_extra_gene_set(options.extra_genes_dict, default_fs_all.index)
+    extra_genes_set = _coerce_extra_gene_set(options.extra_genes_dict, full_feature_frame.index)
 
     n_top = 2700 if options.n_top is None else options.n_top
     n_bottom = 500 if options.n_bottom is None else options.n_bottom
-    n_coarse = len(coarse_deg)
+    n_coarse = len(coarse_features)
     strong_selection_metadata: dict[str, Any] = {"strategy": "all_features"}
 
     if len(step1_adata.var_names) > (n_top + n_bottom):
         top_fs = _ranking_subset(ranked_features, n_top)
         if n_top < n_coarse:
-            bottom_fs = list(variability[default_fs_all["i_0"] == 0].nlargest(n_bottom).index)
-            strong_fs = top_fs + bottom_fs
+            bottom_fs = list(variability[full_feature_frame["i_0"] == 0].nlargest(n_bottom).index)
+            strong_features = top_fs + bottom_fs
             strong_selection_metadata = {
                 "strategy": "coarse_plus_variability",
                 "evaluated_raw_pvalue_count": 0,
@@ -275,52 +275,52 @@ def run_feature_selection(
                 keep_n=n_top + n_bottom,
                 method=options.feature_screen_options.pvalue_method,
             )
-            strong_fs = feature_names[strong_gene_indices].tolist()
+            strong_features = feature_names[strong_gene_indices].tolist()
             strong_selection_metadata["strategy"] = "stable_raw_pvalue_boundary"
 
         if extra_genes_set is not None:
-            add_fs = extra_genes_set - set(strong_fs)
-            if len(add_fs) <= 300:
-                strong_fs = strong_fs + list(add_fs)
+            extra_features = extra_genes_set - set(strong_features)
+            if len(extra_features) <= 300:
+                strong_features = strong_features + list(extra_features)
             else:
-                add_fs = extra_genes_set - set(top_fs)
-                if len(add_fs) <= (n_bottom + 300):
-                    strong_fs = top_fs + list(add_fs)
+                extra_features = extra_genes_set - set(top_fs)
+                if len(extra_features) <= (n_bottom + 300):
+                    strong_features = top_fs + list(extra_features)
                 else:
                     rng = np.random.default_rng(0)
-                    sampled = rng.choice(sorted(add_fs), size=n_bottom + 300, replace=False)
-                    strong_fs = top_fs + list(sampled)
-        adata_strong = _build_feature_subset_adata(step1_adata, strong_fs)
+                    sampled = rng.choice(sorted(extra_features), size=n_bottom + 300, replace=False)
+                    strong_features = top_fs + list(sampled)
+        adata_strong = _build_feature_subset_adata(step1_adata, strong_features)
     else:
-        strong_fs = ranked_features.copy()
-        adata_strong = _build_feature_subset_adata(step1_adata, strong_fs)
+        strong_features = ranked_features.copy()
+        adata_strong = _build_feature_subset_adata(step1_adata, strong_features)
 
-    strong_ranking = [gene for gene in ranked_features if gene in set(strong_fs)]
-    strong_margin = margin_eval.loc[strong_fs, :]
-    fs_05 = [gene for gene in strong_ranking if gene in coarse_deg]
-    fs_core = [gene for gene in strong_ranking if gene in core_deg]
+    strong_ranking = [gene for gene in ranked_features if gene in set(strong_features)]
+    strong_margin = margin_table.loc[strong_features, :]
+    coarse_features_in_strong_set = [gene for gene in strong_ranking if gene in coarse_features]
+    core_features_in_strong_set = [gene for gene in strong_ranking if gene in core_features]
     init_ratio_metadata: dict[str, Any] = {"mode": "fixed" if options.init_ratio is not None else "auto"}
 
     if options.init_ratio is not None:
         if options.init_ratio < 0.7:
-            fix_fs_0 = _ranking_subset(strong_ranking, int(options.init_ratio * len(strong_ranking)))
+            init_ratio_features = _ranking_subset(strong_ranking, int(options.init_ratio * len(strong_ranking)))
         else:
-            fix_fs_0 = strong_margin.loc[strong_margin["p-value"] < 0.7, :].index.tolist()
+            init_ratio_features = strong_margin.loc[strong_margin["p-value"] < 0.7, :].index.tolist()
     else:
         init_ratio_set = [0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         case_rows = adata_strong.obs[prepared_input.contract.perturbation_key] == prepared_input.case_value
         ranking_cols = adata_strong.var_names.get_indexer(strong_ranking)
-        exp_all = np.asarray(adata_strong.layers[options.screen_layer], dtype=np.float32)[case_rows.values, :][
+        ranked_case_expression = np.asarray(adata_strong.layers[options.screen_layer], dtype=np.float32)[case_rows.values, :][
             :, ranking_cols
         ]
-        exp_probe, cap_metadata = _cap_init_ratio_case_expression(exp_all, options=options)
+        capped_case_expression, cap_metadata = _cap_init_ratio_case_expression(ranked_case_expression, options=options)
         init_ratio_metadata["case_cap"] = cap_metadata
         init_ratio_results = _compute_init_ratio_distance_curve(
-            case_expression=exp_probe,
+            case_expression=capped_case_expression,
             init_ratio_set=init_ratio_set,
         )
         init_ratio_results_df = pd.DataFrame(init_ratio_results, columns=["init_ratio", "avg_norm_all_vs_0"])
-        fix_index = _find_flat_point(
+        fix_index = _find_stable_curve_index(
             init_ratio_results_df["avg_norm_all_vs_0"].values,
             window_size=3,
             relative_epsilon_factor=options.fix_point_factor,
@@ -328,25 +328,29 @@ def run_feature_selection(
         fix_init_ratio = float(init_ratio_results_df["init_ratio"].iloc[fix_index])
         init_ratio_metadata["fix_index"] = int(fix_index)
         init_ratio_metadata["fix_init_ratio"] = fix_init_ratio
-        fix_fs_0 = _ranking_subset(strong_ranking, int(fix_init_ratio * len(strong_ranking)))
+        init_ratio_features = _ranking_subset(strong_ranking, int(fix_init_ratio * len(strong_ranking)))
 
-    if (len(fs_core) <= int(options.weak_ratio * len(adata_strong.var_names))) and (len(adata_strong.var_names) > 1e3):
-        reserve_deg = fs_05
+    if (len(core_features_in_strong_set) <= int(options.weak_ratio * len(adata_strong.var_names))) and (
+        len(adata_strong.var_names) > 1e3
+    ):
+        retained_features = coarse_features_in_strong_set
     else:
-        reserve_deg = fix_fs_0 if len(fix_fs_0) > len(fs_05) else fs_05
-    if not reserve_deg:
-        raise ValueError("We donot find suitable genes to perform CRANE Step1.")
+        retained_features = (
+            init_ratio_features if len(init_ratio_features) > len(coarse_features_in_strong_set) else coarse_features_in_strong_set
+        )
+    if not retained_features:
+        raise ValueError("Step 1 did not retain any features for downstream refinement.")
 
     gene_input_strong = adata_strong.var_names
     default_fs = pd.DataFrame({"gene": gene_input_strong}, index=gene_input_strong)
-    default_fs["i_0"] = default_fs.index.isin(reserve_deg).astype(np.int8)
-    guide_fs = pd.Series(default_fs.index.isin(guide_deg).astype(np.int8), index=gene_input_strong, name="i_0")
+    default_fs["i_0"] = default_fs.index.isin(retained_features).astype(np.int8)
+    aux_fs = pd.Series(default_fs.index.isin(aux_features).astype(np.int8), index=gene_input_strong, name="i_0")
 
     metadata = {
-        "coarse_deg_count": len(coarse_deg),
-        "guide_deg_count": len(guide_deg),
-        "strong_feature_count": int(len(strong_fs)),
-        "reserve_deg_count": int(len(reserve_deg)),
+        "coarse_deg_count": len(coarse_features),
+        "guide_deg_count": len(aux_features),
+        "strong_feature_count": int(len(strong_features)),
+        "reserve_deg_count": int(len(retained_features)),
         "raw_pvalue_eval_count": int(screen_result.evaluated_raw_pvalue_count),
         "adj_pvalue_eval_count": int(screen_result.evaluated_adj_pvalue_count),
         "strong_fs_selection": strong_selection_metadata,
@@ -355,8 +359,8 @@ def run_feature_selection(
     return Step1FeatureSelectionResult(
         default_fs=default_fs,
         working_adata=adata_strong,
-        guide_fs=guide_fs,
-        margin_eval=margin_eval.reset_index(drop=True),
+        aux_fs=aux_fs,
+        margin_eval=margin_table.reset_index(drop=True),
         screen_result=screen_result,
         metadata=metadata,
     )
@@ -617,7 +621,7 @@ def run_tendency_evaluation(
         group_obs=prepared_input.contract.perturbation_key,
         control_label=prepared_input.contract.control_value,
         case_label=prepared_input.case_value,
-        fs_slice_ref=feature_selection.guide_fs,
+        fs_slice_ref=feature_selection.aux_fs,
         ident_method=ident_method,
         voting=voting,
         nn_k=options.n_neighbors,
@@ -661,7 +665,7 @@ def run_step1(
         options=sampling_options,
         working_adata=feature_selection.working_adata,
         init_feature_selection=feature_selection.default_fs["i_0"].copy(),
-        guide_feature_selection=feature_selection.guide_fs.copy(),
+        aux_feature_selection=feature_selection.aux_fs.copy(),
         margin_evaluation=feature_selection.margin_eval.copy(),
     )
     metadata = {

@@ -1,6 +1,4 @@
-"""Public package surface for the new CRANE interface layer."""
-
-__version__ = "0.0.1.dev0"
+"""Public package surface for CRANE."""
 
 from . import pl, pp, tl
 from .api import CRANE, run_crane
@@ -23,7 +21,6 @@ __all__ = [
     "LogFileConfig",
     "LoggerConfig",
     "RuntimeOptions",
-    "__version__",
     "load_result",
     "pl",
     "pp",
