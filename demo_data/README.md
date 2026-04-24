@@ -14,7 +14,6 @@ Rebuild local demo files:
 
 ```bash
 python examples/rebuild_demo_data.py
-python examples/scanpy_warmup.py
 ```
 
 This writes:
@@ -22,14 +21,16 @@ This writes:
 ```text
 demo_workspace/data/demo_gsc.h5ad
 demo_workspace/data/demo_erlotinib_drug.h5ad
-demo_workspace/scanpy/
 ```
 
 Recommended demos:
 
 ```bash
-python examples/quickstart.py \
-  --cell-response
+python examples/quickstart.py
+```
+
+```bash
+python examples/quickstart.py --cell-response
 ```
 
 ```bash

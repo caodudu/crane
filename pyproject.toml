@@ -18,15 +18,15 @@ dependencies = [
   "pandas>=2.0",
   "scanpy>=1.10",
   "scikit-learn>=1.4",
-  "scipy>=1.13"
+  "scipy>=1.13",
+  "igraph>=1.0.0",
+  "leidenalg>=0.11.0"
 ]
 
 [project.optional-dependencies]
 extensions = [
   "dynamicTreeCut>=0.1.1",
   "eva-lcd>=0.1.1",
-  "igraph>=1.0.0",
-  "leidenalg>=0.11.0",
   "networkx>=3.0"
 ]
 

@@ -51,12 +51,18 @@ class CRANEExtensionResult:
 
         The extra keyword arguments mirror ``CRANEResult.summary()`` so demo
         code can switch between gene and extension/function results without
-        tripping over a different signature. Extension summaries are already
-        stored at feature level, so ``represent`` / ``normalized`` /
-        ``centered`` are accepted for API compatibility and ignored here.
+        tripping over a different signature.
         """
 
         frame = self.extension_ad.var.copy()
+        if normalized and {"gene_self_cor", "gene_label_cor"}.issubset(frame.columns):
+            score = np.sqrt(
+                np.square(frame["gene_self_cor"].astype(np.float32))
+                + np.square(frame["gene_label_cor"].astype(np.float32))
+            )
+            frame["response_score"] = np.asarray(score / np.sqrt(2.0), dtype=np.float32)
+        if centered and "response_score" in frame.columns:
+            frame["response_score"] = frame["response_score"] - float(frame["response_score"].mean())
         frame.index.name = "feature"
         if responsive_only and "response_identity" in frame.columns:
             frame = frame.loc[frame["response_identity"] == 1].copy()
@@ -398,7 +404,7 @@ def _gene_set_to_cell_vectors(
         if not valid_indices:
             valid_indices = [0]
 
-        columns = [f"{set_name}_mode{idx + 1}" for idx in valid_indices]
+        columns = [f"{set_name}_pc{idx + 1}" for idx in valid_indices]
         cell_embeddings.append(
             pd.DataFrame(pca_result[:, valid_indices].astype(np.float32), index=exp.index, columns=columns)
         )

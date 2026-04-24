@@ -169,7 +169,14 @@ def _run_knn_leiden(gene_cor: np.ndarray, fs_ind: np.ndarray, min_correlation: f
     cor_ad = ad.AnnData(embedding.astype(np.float32, copy=False))
     cor_ad.obsp["connectivities"] = connectivities
     cor_ad.uns["neighbors"] = {"connectivities_key": "connectivities"}
-    sc.tl.leiden(cor_ad, key_added="module_backend_label", resolution=0.1)
+    sc.tl.leiden(
+        cor_ad,
+        key_added="module_backend_label",
+        resolution=0.1,
+        flavor="igraph",
+        n_iterations=2,
+        directed=False,
+    )
     return (
         cor_ad.obs["module_backend_label"].astype(str).to_numpy(),
         np.asarray(cor_ad.obsp["connectivities"].toarray(), dtype=np.float32),
@@ -197,7 +204,14 @@ def _run_wgcna_leiden(gene_cor: np.ndarray, fs_ind: np.ndarray, min_correlation:
     ad_leiden = ad.AnnData(filtered_sparse)
     ad_leiden.obsp["connectivities"] = sparse.csr_matrix(filtered_sparse)
     ad_leiden.uns["neighbors"] = {"connectivities_key": "connectivities"}
-    sc.tl.leiden(ad_leiden, key_added="module_backend_label", resolution=leiden_resolution)
+    sc.tl.leiden(
+        ad_leiden,
+        key_added="module_backend_label",
+        resolution=leiden_resolution,
+        flavor="igraph",
+        n_iterations=2,
+        directed=False,
+    )
     module_label = (ad_leiden.obs["module_backend_label"].astype(int) + 1).astype(str).to_numpy()
 
     kept_idx = np.where(mask)[0]

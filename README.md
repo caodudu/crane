@@ -38,28 +38,31 @@ case label: "GSC"
 git clone https://github.com/caodudu/crane.git
 cd crane
 pip install -e .
-python examples/rebuild_demo_data.py
-python examples/scanpy_warmup.py
 ```
 
-These commands create a local `demo_workspace/` directory, rebuild the demo `.h5ad` files, and run a standard Scanpy HVG/PCA/neighbors/UMAP workflow once before CRANE.
+## Demo Workspace
 
-The Scanpy step is included for two reasons:
+Create a local test workspace and rebuild the demo `.h5ad` files:
 
-- it warms up Scanpy/UMAP runtime dependencies before timing CRANE
-- it gives a familiar baseline view of the demo data
+```bash
+mkdir demo_workspace
+python examples/rebuild_demo_data.py
+```
 
-The HVG-filtered Scanpy object is not used as CRANE input.
+This writes:
 
-## Standard Scanpy baseline
+```text
+demo_workspace/data/demo_gsc.h5ad
+demo_workspace/data/demo_erlotinib_drug.h5ad
+```
 
-The warm-up command writes baseline UMAP plots to:
+The demo scripts first run a standard Scanpy HVG/PCA/neighbors/UMAP view for exploratory analysis, then run CRANE on the rebuilt AnnData expression layer. The HVG-subsetted Scanpy object is only used for visualization and is not used as CRANE input.
+
+Scanpy baseline plots are written to:
 
 ```text
 demo_workspace/scanpy/
 ```
-
-This step uses the standard Scanpy HVG workflow for visualization only. CRANE is then run on the expression layer from the rebuilt AnnData object, not on the HVG-subsetted Scanpy object.
 
 ## Quick Start (Gene response)
 
@@ -77,6 +80,15 @@ import crane
 
 adata = sc.read_h5ad("demo_workspace/data/demo_gsc.h5ad")
 
+# Standard Scanpy exploratory view. CRANE below still uses the original adata.
+view = adata.copy()
+sc.pp.highly_variable_genes(view, layer="log1p_norm", n_top_genes=2000, flavor="seurat")
+view_hvg = view[:, view.var["highly_variable"]].copy()
+view_hvg.X = view_hvg.layers["log1p_norm"].copy()
+sc.pp.pca(view_hvg)
+sc.pp.neighbors(view_hvg)
+sc.tl.umap(view_hvg)
+
 result = crane.tl.gene_response(
     adata,
     perturbation_key="perturbation_targets",
@@ -86,24 +98,24 @@ result = crane.tl.gene_response(
     inplace=False,
 )
 
-result.summary().head()
+result.summary(normalized=True).head()
 ```
 
 Example output:
 
 | gene | response_identity | response_score | gene_self_cor | gene_label_cor |
 | --- | --- | --- | --- | --- |
-| MFAP4 | 1 | 1.249 | 0.886 | 0.880 |
-| POU5F1 | 1 | 1.245 | 0.913 | 0.846 |
-| CXCR4 | 1 | 1.230 | 0.906 | -0.833 |
-| LEFTY2 | 1 | 1.195 | 0.864 | -0.826 |
-| TMEM14B | 1 | 1.189 | 0.834 | -0.847 |
+| MFAP4 | 1 | 0.883 | 0.886 | 0.880 |
+| POU5F1 | 1 | 0.880 | 0.913 | 0.846 |
+| CXCR4 | 1 | 0.870 | 0.906 | -0.833 |
+| LEFTY2 | 1 | 0.845 | 0.864 | -0.826 |
+| TMEM14B | 1 | 0.841 | 0.834 | -0.847 |
 
 The result object also supports response-gene relationship and module summaries:
 
 ```python
 pair = result.gene_pair()
-module = result.gene_module(method="correlation_components")
+module = result.gene_module()
 ```
 
 Example pairwise gene-response output:
@@ -120,11 +132,11 @@ Example module output:
 
 | gene | module_label |
 | --- | --- |
-| GSC | M1 |
-| TMEM14B | M1 |
-| CXCR4 | M1 |
-| POU5F1 | M1 |
-| LEFTY2 | M1 |
+| GSC | M2 |
+| TMEM14B | M2 |
+| CXCR4 | M2 |
+| POU5F1 | M3 |
+| LEFTY2 | M2 |
 
 ## Quick Start (Cell response)
 
@@ -161,25 +173,25 @@ Example output:
 
 ## Quick Start (Extension response)
 
-CRANE can also evaluate cell-level covariates or other vectors on the same response graph. This is useful for checking whether common covariates remain strongly structured after CRANE graph refinement.
+The GSC CRISPR demo contains common cell-level covariates such as library size, cell-cycle scores, phase, and batch labels. The extension demo compares how strongly these covariates are structured on a standard Scanpy HVG graph versus the CRANE response graph.
 
-Run the GSC CRISPR covariate demo:
+Run:
 
 ```bash
 python examples/extension_response_covariates.py
 ```
 
-The demo evaluates library size, cell-cycle scores, phase, and batch labels.
-
 Example output:
 
-| feature | response_score | gene_self_cor | gene_label_cor |
+| feature | Scanpy HVG graph | CRANE graph | reduction |
 | --- | --- | --- | --- |
-| phase_G1 | 0.128 | -0.001 | 0.128 |
-| S_score | 0.116 | -0.024 | 0.114 |
-| phase_G2M | 0.103 | -0.001 | -0.103 |
-| n_genes | 0.073 | -0.028 | -0.067 |
-| G2M_score | 0.038 | -0.021 | -0.032 |
+| G2M_score | 0.939 | 0.021 | 97.8% |
+| phase_G2M | 0.777 | 0.001 | 99.9% |
+| phase_G1 | 0.723 | 0.001 | 99.8% |
+| S_score | 0.564 | 0.024 | 95.8% |
+| n_genes | 0.541 | 0.028 | 94.9% |
+
+This is the intended reading: covariates that are strongly structured in a standard Scanpy graph become much less structured on the CRANE response graph.
 
 ## Quick Start (Functional response)
 
@@ -220,36 +232,14 @@ function_result = crane.tl.function_response(
     set_min_genes_count=10,
 )
 
-function_result.summary().head()
+function_result.summary(normalized=True).head()
 ```
 
-Example output:
+Example output, showing only the highest-response component for each gene set:
 
-| feature | response_score | gene_self_cor | gene_label_cor | gene_call |
+| gene set | top component | response_score | gene_self_cor | gene_label_cor |
 | --- | --- | --- | --- | --- |
-| EGFR_mode1 | 0.768 | 0.556 | 0.529 | 28 |
-| MAPK_mode2 | 0.626 | 0.448 | 0.438 | 34 |
-| MAPK_mode1 | 0.518 | 0.335 | 0.394 | 41 |
-| EGFR_mode3 | 0.278 | 0.125 | 0.249 | 32 |
-| MAPK_mode4 | 0.239 | 0.112 | 0.211 | 27 |
+| MAPK | MAPK_pc2 | 0.662 | 0.708 | 0.612 |
+| EGFR | EGFR_pc1 | 0.584 | 0.567 | -0.599 |
 
-## Demo Workspace
-
-The demo data in this repository is stored as compressed AnnData components, not as the original large `.h5ad` files.
-
-Create the local demo workspace:
-
-```bash
-python examples/rebuild_demo_data.py
-python examples/scanpy_warmup.py
-```
-
-This writes:
-
-```text
-demo_workspace/data/demo_gsc.h5ad
-demo_workspace/data/demo_erlotinib_drug.h5ad
-demo_workspace/scanpy/
-```
-
-After that, the demo commands in this README can be copied and run without editing paths or parameters.
+After the demo workspace is created, all commands above can be copied and run without editing paths or parameters.
