@@ -1,6 +1,6 @@
 # CRANE
 
-CRANE is a Python package for analyzing perturbation responses in single-cell expression data.
+CRANE(under review) is a Python package for analyzing perturbation responses in single-cell expression data.
 
 Unlike a simple perturbed-vs-control expression comparison, CRANE evaluates whether expression changes are aligned with perturbation labels across local cell neighborhoods. This is useful when some labeled cells do not fully respond, or when batch, cell cycle, library size, and other structured variation obscure the perturbation signal.
 
