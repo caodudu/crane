@@ -44,6 +44,12 @@ conda activate crane-demo
 pip install -e .
 ```
 
+## Try Online
+
+[![Open in Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/caodudu/crane/HEAD?urlpath=lab/tree/examples/online_demo.ipynb)
+
+You can also open a temporary online notebook without setting up a local environment. The first launch may take several minutes while the environment is built.
+
 ## Demo Workspace
 
 Create a local test workspace inside the cloned repository and rebuild the demo `.h5ad` files. If you just ran the installation commands above, you are already inside this directory.

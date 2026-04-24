@@ -1,0 +1,2 @@
+binder/postBuild text eol=lf
+binder/*.yml text eol=lf
